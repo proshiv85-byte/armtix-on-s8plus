@@ -30,7 +30,7 @@ abort() { ui " "; ui "!!! ERROR: $*"; ui "!!! Nothing was changed after this poi
 ui "=============================================="
 ui "  ARMtix Linux for Galaxy S8+ (dream2lte)"
 ui "=============================================="
-ui "              By tg:@Thereno1                 "
+ui "              By t.me/smasnug_ports           "
 
 rm -rf $W; mkdir -p $W
 unzip -o "$ZIP" armtix/busybox -d $W >/dev/null 2>&1 || abort "cannot unpack busybox"

@@ -61,5 +61,5 @@ TWRP zip: `tools/make_twrp_zip.sh` (from a running phone) or
 
 ## Credits
 
-Port by tg:@Thereno1, with Claude (Anthropic) as engineering assistant.
+Port by t.me/smasnug_ports, with Claude (Anthropic) as engineering assistant.
 Kernel: Samsung / exynos-linux-stable. Distribution: Artix Linux / ARMtix.

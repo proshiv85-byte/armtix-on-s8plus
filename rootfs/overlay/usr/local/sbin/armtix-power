@@ -1,0 +1,16 @@
+#!/bin/sh
+# armtix-power poweroff|reboot|recovery   (root; armtix may sudo it)
+case $1 in
+	poweroff) exec /usr/bin/poweroff ;;
+	reboot)   exec /usr/bin/reboot ;;
+	recovery)
+		# OpenRC's reboot can't pass a reboot argument, so: flush, emergency
+		# read-only remount, then reboot(RESTART2, "recovery") -> Samsung
+		# S-Boot boots the RECOVERY partition (TWRP).
+		sync
+		echo s > /proc/sysrq-trigger; sleep 1
+		echo u > /proc/sysrq-trigger; sleep 1
+		exec python3 -c 'import ctypes; ctypes.CDLL(None, use_errno=True).syscall(142, 0xfee1dead, 672274793, 0xA1B2C3D4, b"recovery")'
+		;;
+	*) echo "usage: $0 poweroff|reboot|recovery" >&2; exit 1 ;;
+esac

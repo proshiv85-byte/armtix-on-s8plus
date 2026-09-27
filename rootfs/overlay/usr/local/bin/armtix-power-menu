@@ -1,0 +1,15 @@
+#!/bin/sh
+# Power-key menu (bound to XF86PowerOff in xfce4-keyboard-shortcuts)
+pgrep -u "$(id -u)" -f "yad --title=Power" >/dev/null && exit 0   # already open
+yad --title=Power --window-icon=system-shutdown --center --on-top \
+	--undecorated --borders=24 --buttons-layout=spread \
+	--text="<big><b>Power</b></big>" --text-align=center \
+	--button="Power off:10" --button="Reboot:11" \
+	--button="Recovery:12" --button="Restart desktop:13" \
+	--button="Cancel:1" 2>/dev/null
+case $? in
+	10) sudo -n /usr/local/sbin/armtix-power poweroff ;;
+	11) sudo -n /usr/local/sbin/armtix-power reboot ;;
+	12) sudo -n /usr/local/sbin/armtix-power recovery ;;
+	13) xfce4-session-logout --logout --fast ;;
+esac

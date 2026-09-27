@@ -1,0 +1,8 @@
+#!/usr/bin/openrc-run
+description="Answer kernel firmware requests (no udev on this kernel)"
+command=/usr/local/sbin/armtix-fwload
+supervisor=supervise-daemon
+depend() {
+	need localmount
+	before wifi dhcpcd usbnet
+}

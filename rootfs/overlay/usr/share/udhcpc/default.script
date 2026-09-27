@@ -1,0 +1,24 @@
+#!/bin/sh
+# Minimal udhcpc hook for ARMtix: apply DHCP result from busybox udhcpc.
+# Env vars come from udhcpc: $interface $ip $subnet $router $dns $broadcast
+
+case "$1" in
+	deconfig)
+		ip addr flush dev "$interface" 2>/dev/null
+		ip link set "$interface" down 2>/dev/null
+		;;
+	bound|renew|static)
+		ip link set "$interface" up 2>/dev/null
+		[ -n "$subnet" ] || subnet=24
+		ip addr flush dev "$interface" 2>/dev/null
+		ip addr add "${ip}/${subnet}" broadcast "${broadcast:-+}" dev "$interface" 2>/dev/null
+		if [ -n "$router" ]; then
+			ip route add default via "$router" dev "$interface" 2>/dev/null
+		fi
+		: > /etc/resolv.conf 2>/dev/null
+		for ns in $dns; do
+			echo "nameserver $ns" >> /etc/resolv.conf 2>/dev/null
+		done
+		;;
+esac
+exit 0

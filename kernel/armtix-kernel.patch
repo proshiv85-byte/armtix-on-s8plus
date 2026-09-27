@@ -1,0 +1,469 @@
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_common.dtsi b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_common.dtsi
+index ac9127a6..4d0210f6 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_common.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_common.dtsi
+@@ -955,7 +955,7 @@
+ 	usb@10C00000 {
+ 		status = "okay";
+ 		dwc3 {
+-			dr_mode = "otg";
++			dr_mode = "otg";	/* ARMtix: host (OTG keyboard/mouse) + gadget (RNDIS), switched by the CCIC */
+ 			maximum-speed = "super-speed";
+ 		};
+ 	};
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_eur_open_10.dts b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_eur_open_10.dts
+index 47fa1214..98c2862d 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_eur_open_10.dts
++++ b/arch/arm64/boot/dts/exynos/exynos8895-dream2lte_eur_open_10.dts
+@@ -296,3 +296,21 @@
+ 		gpio,lcd-reset = <&gpa0 5 0x1>;
+ 	};
+ };
++
++/*
++ * ARMtix: keep the USB PHY supplies on. On Android the usb_notifier turns
++ * them on at cable attach (otg_notify set_ldo_onoff); on a plain Linux
++ * rootfs that event is never delivered, the regulator core switches them
++ * off as "unused" at late init, and every DWC3 endpoint command times out.
++ */
++&ldo6_reg {	/* hs-regulator, USB2 PHY 3.3V */
++	regulator-always-on;
++};
++
++&ldo10_reg {	/* ss-regulator, USB3 PHY 0.85V */
++	regulator-always-on;
++};
++
++&ldo37_reg {	/* dp-regulator, VDD_DP_1P8 */
++	regulator-always-on;
++};
+diff --git a/drivers/input/touchscreen/stm/fts_ts.c b/drivers/input/touchscreen/stm/fts_ts.c
+index 83a0e863..9e7398e5 100644
+--- a/drivers/input/touchscreen/stm/fts_ts.c
++++ b/drivers/input/touchscreen/stm/fts_ts.c
+@@ -2760,7 +2760,8 @@ static void fts_set_input_prop(struct fts_ts_info *info, struct input_dev *dev,
+ 	set_bit(EV_ABS, dev->evbit);
+ 	set_bit(propbit, dev->propbit);
+ 	set_bit(BTN_TOUCH, dev->keybit);
+-	set_bit(BTN_TOOL_FINGER, dev->keybit);
++	/* ARMtix: BTN_TOOL_FINGER makes Linux userspace (xf86-input-evdev,
++	 * libinput) treat this direct-touch screen as a touchpad. */
+ 	set_bit(KEY_BLACK_UI_GESTURE, dev->keybit);
+ 	set_bit(KEY_HOMEPAGE, dev->keybit);
+ 	set_bit(KEY_INT_CANCEL, dev->keybit);
+@@ -2796,7 +2797,8 @@ static void fts_set_input_prop(struct fts_ts_info *info, struct input_dev *dev,
+ 				 0, 255, 0, 0);
+ 	input_set_abs_params(dev, ABS_MT_TOUCH_MINOR,
+ 				 0, 255, 0, 0);
+-	input_set_abs_params(dev, ABS_MT_CUSTOM, 0, 0xFFFFFFFF, 0, 0);
++	/* ARMtix: ABS_MT_CUSTOM (Samsung) with max 0xFFFFFFFF reads back as
++	 * min 0 / max -1 and breaks Xorg; don't advertise it. */
+ 
+ 	if (info->board->support_hover)
+ 		input_set_abs_params(dev, ABS_MT_DISTANCE, 0, 255, 0, 0);
+diff --git a/drivers/staging/samsung/sec_batt.c b/drivers/staging/samsung/sec_batt.c
+index c8c887b3..7dd0b5f3 100644
+--- a/drivers/staging/samsung/sec_batt.c
++++ b/drivers/staging/samsung/sec_batt.c
+@@ -23,12 +23,11 @@ EXPORT_SYMBOL(charging_night_mode);
+ 
+ static int sec_bat_is_lpm_check(char *str)
+ {
+-	if (strncmp(str, "charger", 7) == 0)
+-		lpcharge = 1;
+-
+-	pr_info("%s: Low power charging mode: %d\n", __func__, lpcharge);
+-
+-	return lpcharge;
++	/* ARMtix port has no off-mode charging UI: force a normal boot even
++	 * when the bootloader boots in "charger" (LPM) mode with a cable in. */
++	lpcharge = 0;
++	pr_info("%s: LPM disabled (lpcharge=%d)\n", __func__, lpcharge);
++	return 0;
+ }
+ __setup("androidboot.mode=", sec_bat_is_lpm_check);
+ 
+diff --git a/drivers/usb/dwc3/core.c b/drivers/usb/dwc3/core.c
+index 059f1cd7..50055723 100644
+--- a/drivers/usb/dwc3/core.c
++++ b/drivers/usb/dwc3/core.c
+@@ -1240,8 +1240,10 @@ static int dwc3_probe(struct platform_device *pdev)
+ 		fladj = pdata->fladj_value;
+ 	}
+ 
+-	dev_info(dwc->dev, "%s: dr_mode:%d, suspend clock:%dMHz\n", __func__,
+-			dwc->dr_mode , dwc->suspend_clk_freq/1000000);
++	dev_info(dwc->dev,
++		"%s: dr_mode:%d (dt=%d pdata=%d), suspend clock:%dMHz\n",
++		__func__, dwc->dr_mode, usb_get_dr_mode(dev),
++		pdata ? pdata->dr_mode : -1, dwc->suspend_clk_freq/1000000);
+ 
+ 	/* default to superspeed if no maximum_speed passed */
+ 	if (dwc->maximum_speed == USB_SPEED_UNKNOWN)
+diff --git a/drivers/usb/dwc3/dwc3-exynos.c b/drivers/usb/dwc3/dwc3-exynos.c
+index 6f0770b6..b1b3ee05 100644
+--- a/drivers/usb/dwc3/dwc3-exynos.c
++++ b/drivers/usb/dwc3/dwc3-exynos.c
+@@ -291,7 +291,9 @@ int dwc3_exynos_rsw_start(struct device *dev)
+ 
+ 	/* B-device by default */
+ 	rsw->fsm->id = 1;
+-	rsw->fsm->b_sess_vld = 0;
++	/* Force VBUS present: this port has no off-mode USB-C detection, so
++	 * without this the OTG FSM stays in b_idle and the gadget never binds. */
++	rsw->fsm->b_sess_vld = 1;
+ 
+ 	return 0;
+ }
+@@ -640,8 +642,11 @@ static void dwc3_exynos_shutdown(struct platform_device *pdev)
+ 
+ 	dev_info(dev, "%s +\n", __func__);
+ 
+-	fsm->reset = 1;
+-	dwc3_otg_run_sm(rsw->fsm);
++	/* no OTG FSM when dr_mode = "peripheral" */
++	if (fsm) {
++		fsm->reset = 1;
++		dwc3_otg_run_sm(rsw->fsm);
++	}
+ 
+ 	dev_info(dev, "%s -\n", __func__);
+ }
+diff --git a/drivers/usb/dwc3/gadget.c b/drivers/usb/dwc3/gadget.c
+index adbc81f1..8cff9710 100644
+--- a/drivers/usb/dwc3/gadget.c
++++ b/drivers/usb/dwc3/gadget.c
+@@ -414,8 +414,12 @@ int dwc3_send_gadget_ep_cmd(struct dwc3 *dwc, unsigned ep,
+ 			dwc3_trace(trace_dwc3_gadget,
+ 					"Command Complete --> %d",
+ 					DWC3_DEPCMD_STATUS(reg));
+-			if (DWC3_DEPCMD_STATUS(reg) & ~DEPEVT_TRANSFER_BUS_EXPIRY)
++			if (DWC3_DEPCMD_STATUS(reg) & ~DEPEVT_TRANSFER_BUS_EXPIRY) {
++				dev_err(dwc->dev,
++					"dwc3: ep%u cmd=0x%x FAILED status=0x%x DEPCMD=0x%08x\n",
++					ep, cmd, DWC3_DEPCMD_STATUS(reg), reg);
+ 				return -EINVAL;
++			}
+ 			return 0;
+ 		}
+ 
+@@ -425,6 +429,7 @@ int dwc3_send_gadget_ep_cmd(struct dwc3 *dwc, unsigned ep,
+ 		 */
+ 		timeout--;
+ 		if (!timeout) {
++			dev_err(dwc->dev, "dwc3: ep%u cmd=0x%x TIMED OUT\n", ep, cmd);
+ 			dwc3_trace(trace_dwc3_gadget,
+ 					"Command Timed Out");
+ 			return -ETIMEDOUT;
+@@ -523,15 +528,23 @@ static int dwc3_gadget_start_config(struct dwc3 *dwc, struct dwc3_ep *dep)
+ 	if (ret)
+ 		return ret;
+ 
++	dev_info(dwc->dev, "dwc3: revision=0x%08x (start_config)\n", dwc->revision);
++
+ 	for (i = 0; i < DWC3_ENDPOINTS_NUM; i++) {
+ 		struct dwc3_ep *dep = dwc->eps[i];
+ 
+ 		if (!dep)
+ 			continue;
+ 
++		/* Samsung/DWC3-3.00a+ transfer-resource assignment (DEPXFERCFG,
++		 * opcode 0x02). On the Exynos 8895 DWC3 this command is not
++		 * accepted and times out, so treat it as best-effort.
++		 */
+ 		ret = dwc3_gadget_set_xfer_resource(dwc, dep);
+ 		if (ret)
+-			return ret;
++			dev_warn(dwc->dev,
++				"dwc3: ep%d SETTRANSFRESOURCE skipped (rc=%d)\n",
++				 dep->number, ret);
+ 	}
+ 
+ 	return 0;
+@@ -1935,7 +1948,9 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
+ {
+ 	struct dwc3		*dwc = gadget_to_dwc(g);
+ 	unsigned long		flags;
+-	struct usb_otg		*otg = &(dwc->dotg->otg);
++	/* dotg is NULL when dr_mode = "peripheral" (no OTG state machine) */
++	int			otg_state = dwc->dotg ? dwc->dotg->otg.state
++						: OTG_STATE_B_PERIPHERAL;
+ 	int			ret;
+ 
+ 	is_on = !!is_on;
+@@ -1962,8 +1977,8 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
+ 	if (is_on) {
+ 		dwc3_soft_reset(dwc);
+ 
+-		phy_tune(dwc->usb2_generic_phy, otg->state);
+-		phy_tune(dwc->usb3_generic_phy, otg->state);
++		phy_tune(dwc->usb2_generic_phy, otg_state);
++		phy_tune(dwc->usb3_generic_phy, otg_state);
+ 
+ 		/**
+ 		 * In case there is not a resistance to detect VBUS,
+diff --git a/drivers/video/fbdev/exynos/dpu/decon_core.c b/drivers/video/fbdev/exynos/dpu/decon_core.c
+index d4c796cb..4aa91c72 100644
+--- a/drivers/video/fbdev/exynos/dpu/decon_core.c
++++ b/drivers/video/fbdev/exynos/dpu/decon_core.c
+@@ -928,6 +928,22 @@ static int decon_blank(int blank_mode, struct fb_info *info)
+ 		return ret;
+ 	}
+ 
++	/*
++	 * ARMtix: without Android's hwcomposer nobody re-programs the window
++	 * after decon_enable(), so a blank is permanent (and the touchscreen
++	 * powers down with the panel). Xorg's fbdev driver blanks during
++	 * ScreenInit. Keep the main panel pipeline running instead.
++	 */
++	if (decon->id == 0 && decon->dt.out_type == DECON_OUT_DSI) {
++		if (blank_mode != FB_BLANK_UNBLANK) {
++			decon_info("%s: ignoring blank %d on main panel\n",
++					__func__, blank_mode);
++			return 0;
++		}
++		if (decon->state == DECON_STATE_ON)
++			return 0;
++	}
++
+ 	decon_hiber_block_exit(decon);
+ 
+ 	switch (blank_mode) {
+@@ -3297,7 +3313,9 @@ int decon_release(struct fb_info *info, int user)
+ 				decon->id, decon->out_sd[0]->name);
+ 	}
+ 
+-	if (decon->dt.out_type == DECON_OUT_DSI) {
++	/* ARMtix: keep the main panel running when the last fb user (Xorg)
++	 * closes it; nothing would re-program it afterwards (see decon_blank) */
++	if (decon->dt.out_type == DECON_OUT_DSI && decon->id != 0) {
+ 		decon_hiber_block_exit(decon);
+ 		/* Unused DECON state is DECON_STATE_INIT */
+ 		if (decon->state == DECON_STATE_ON)
+@@ -3333,6 +3351,8 @@ static struct fb_ops decon_fb_ops = {
+ 	.fb_blank	= decon_blank,
+ 	.fb_setcolreg	= decon_setcolreg,
+ 	.fb_fillrect    = cfb_fillrect,
++	.fb_copyarea    = cfb_copyarea,
++	.fb_imageblit   = cfb_imageblit,
+ #ifdef CONFIG_COMPAT
+ 	.fb_compat_ioctl = decon_compat_ioctl,
+ #endif
+@@ -4037,7 +4057,8 @@ static int decon_initial_display(struct decon_device *decon, bool is_colormap)
+ 
+ 	dsim = container_of(decon->out_sd[0], struct dsim_device, sd);
+ 	decon->version = dsim->version;
+-	if (decon_reg_init(decon->id, decon->dt.out_idx[0], &p) < 0) {
++	if (decon_reg_init(decon->id, decon->dt.out_idx[0], &p) < 0 &&
++	    decon->panel_state->init_at != PANEL_INIT_BOOT) {
+ 		goto decon_init_done;
+ 	}
+ 
+@@ -4066,9 +4087,36 @@ static int decon_initial_display(struct decon_device *decon, bool is_colormap)
+ 
+ 	if (decon->panel_state->init_at == PANEL_INIT_BOOT) {
+ 		decon_info("%s:already called by BOOTLOADER\n", __func__);
++		/* Point the DPP at the kernel framebuffer (the bootloader only
++		 * scanned its own fb), then start the decon scanning. */
++		set_bit(decon->dt.dft_idma, &decon->cur_using_dpp);
++		set_bit(decon->dt.dft_idma, &decon->prev_used_dpp);
++		memset(&config, 0, sizeof(struct decon_win_config));
++		config.dpp_parm.addr[0] = fbinfo->fix.smem_start;
++		config.format = DECON_PIXEL_FORMAT_ARGB_8888; /* 0xAARRGGBB = fb var (red@16), i.e. XRGB8888 */
++		config.src.w = fbinfo->var.xres;
++		config.src.h = fbinfo->var.yres;
++		config.src.f_w = fbinfo->var.xres;
++		config.src.f_h = fbinfo->var.yres;
++		config.dst.w = config.src.w;
++		config.dst.h = config.src.h;
++		config.dst.f_w = config.src.f_w;
++		config.dst.f_h = config.src.f_h;
++		sd = decon->dpp_sd[decon->dt.dft_idma];
++		if (v4l2_subdev_call(sd, core, ioctl, DPP_WIN_CONFIG, &config)) {
++			decon_err("Failed to config DPP-%d\n",
++				decon->dt.dft_idma);
++			clear_bit(decon->dt.dft_idma, &decon->cur_using_dpp);
++			set_bit(decon->dt.dft_idma, &decon->dpp_err_stat);
++		} else {
++			decon_info("fb console: DPP configured smem=0x%x\n",
++				(u32)config.dpp_parm.addr[0]);
++		}
+ 		decon_to_psr_info(decon, &psr);
+ 		decon_reg_update_req_window(decon->id, decon->dt.dft_win);
+ 		decon_reg_set_int(decon->id, &psr, 1);
++		decon_reg_start(decon->id, &psr);
++		decon_info("fb console: decon_reg_start done\n");
+ 		goto decon_init_done;
+ 	}
+ 
+@@ -4076,7 +4124,7 @@ static int decon_initial_display(struct decon_device *decon, bool is_colormap)
+ 	set_bit(decon->dt.dft_idma, &decon->prev_used_dpp);
+ 	memset(&config, 0, sizeof(struct decon_win_config));
+ 	config.dpp_parm.addr[0] = fbinfo->fix.smem_start;
+-	config.format = DECON_PIXEL_FORMAT_BGRA_8888;
++	config.format = DECON_PIXEL_FORMAT_ARGB_8888; /* 0xAARRGGBB = fb var (red@16), i.e. XRGB8888 */
+ 	config.src.w = fbinfo->var.xres;
+ 	config.src.h = fbinfo->var.yres;
+ 	config.src.f_w = fbinfo->var.xres;
+diff --git a/drivers/video/fbdev/exynos/dpu/decon_dsi.c b/drivers/video/fbdev/exynos/dpu/decon_dsi.c
+index eeaa2ba1..2b6c0372 100644
+--- a/drivers/video/fbdev/exynos/dpu/decon_dsi.c
++++ b/drivers/video/fbdev/exynos/dpu/decon_dsi.c
+@@ -963,7 +963,8 @@ int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+ 		break;
+ 	case 24:
+ 	case 32:
+-		config.format = DECON_PIXEL_FORMAT_ABGR_8888;
++		/* ARMtix: 0xAARRGGBB, matches the fb var (red@16) */
++		config.format = DECON_PIXEL_FORMAT_ARGB_8888;
+ 		shift = 4;
+ 		break;
+ 	default:
+@@ -1003,6 +1004,10 @@ int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+ 	if (decon_reg_wait_update_done_and_mask(decon->id, &psr, SHADOW_UPDATE_TIMEOUT)
+ 			< 0)
+ 		decon_err("%s: wait_for_update_timeout\n", __func__);
++	/* ARMtix: keep the (command-mode) panel refreshing from the fb on every
++	 * TE; the call above masks the trigger, expecting hwcomposer to re-arm
++	 * it per frame. Without this the panel freezes on the last frame. */
++	decon_reg_set_trigger(decon->id, &psr, DECON_TRIG_ENABLE);
+ 
+ 	if (state->disp_on == PANEL_DISPLAY_OFF) {
+ 		disp_on = 1;
+diff --git a/include/uapi/linux/android/binder.h b/include/uapi/linux/android/binder.h
+index 2d6a0a6c..1480db8d 100644
+--- a/include/uapi/linux/android/binder.h
++++ b/include/uapi/linux/android/binder.h
+@@ -335,11 +335,6 @@ struct binder_transaction_data_secctx {
+ 	binder_uintptr_t secctx;
+ };
+ 
+-struct binder_transaction_data_secctx {
+-	struct binder_transaction_data transaction_data;
+-	binder_uintptr_t secctx;
+-};
+-
+ struct binder_transaction_data_sg {
+ 	struct binder_transaction_data transaction_data;
+ 	binder_size_t buffers_size;
+diff --git a/kernel/cred.c b/kernel/cred.c
+index 5ad950fa..1a92b93d 100644
+--- a/kernel/cred.c
++++ b/kernel/cred.c
+@@ -223,7 +223,6 @@ void __put_cred(struct cred *cred)
+ #endif
+ 	BUG_ON(cred == current->cred);
+ 	BUG_ON(cred == current->real_cred);
+-<<<<<<< HEAD
+ #ifdef CONFIG_RKP_KDP
+ 	if (rkp_ro_page((unsigned long)cred)) {
+ 		put_ro_cred(cred);
+@@ -818,7 +817,6 @@ const struct cred *override_creds(const struct cred *new)
+ 
+ 	validate_creds(old);
+ 	validate_creds(new);
+-<<<<<<< HEAD
+ #ifdef CONFIG_RKP_KDP
+ 	if(rkp_cred_enable) {
+ 		cred_param_t cred_param;
+diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
+index 4bbeb9f9..32548919 100644
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -423,12 +423,17 @@ out_rcu_unlock:
+ }
+ 
+ /* START_OF_KNOX_NPA */
++#ifdef CONFIG_KNOX_NCM
++#include <net/ncm.h>
++#endif
+ /** The function is used to check if the ncm feature is enabled or not; if enabled then it calls knox_collect_socket_data function in ncm.c to record all the socket data; **/
++#ifdef CONFIG_KNOX_NCM
+ static void knox_collect_metadata(struct socket *sock) {
+     if(check_ncm_flag()) {
+     	knox_collect_socket_data(sock);
+     }
+ }
++#endif
+ /* END_OF_KNOX_NPA */
+ 
+ /*
+@@ -461,7 +466,9 @@ int inet_release(struct socket *sock)
+ 		    !(current->flags & PF_EXITING))
+ 			timeout = sk->sk_lingertime;
+         /* START_OF_KNOX_NPA */
++#ifdef CONFIG_KNOX_NCM
+         knox_collect_metadata(sock);
++#endif
+         /* END_OF_KNOX_NPA */
+ 		sock->sk = NULL;
+ 		sk->sk_prot->close(sk, timeout);
+diff --git a/scripts/fips_crypto_utils.c b/scripts/fips_crypto_utils.c
+index 120796fc..e71153fa 100644
+--- a/scripts/fips_crypto_utils.c
++++ b/scripts/fips_crypto_utils.c
+@@ -13,7 +13,14 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+- 
++#include <string.h>
++
++int update_crypto_hmac(const char *vmlinux_path, const char *hmac_path,
++			unsigned long offset);
++int collect_crypto_bytes(const char *in_file, const char *section_name,
++			unsigned long offset, unsigned long size,
++			const char *out_file);
++
+ int main (int argc, char **argv)
+ {
+ 	if (argc < 2)
+diff --git a/sound/soc/samsung/abox/abox.c b/sound/soc/samsung/abox/abox.c
+index a5a8ec83..a7eca7a3 100644
+--- a/sound/soc/samsung/abox/abox.c
++++ b/sound/soc/samsung/abox/abox.c
+@@ -296,7 +296,7 @@ static int abox_start_ipc_transaction_atomic(struct device *dev,
+ 		break;
+ 	}
+ 
+-	memcpy(tx_sram_base, supplement, size);
++	memcpy_toio(tx_sram_base, supplement, size); /* ARMtix: iomem */
+ 	writel(1, tx_ack_sram_base);
+ 	abox_gic_generate_interrupt(data->pdev_gic, hw_irq);
+ 
+@@ -348,7 +348,7 @@ static void abox_process_ipc(struct work_struct *work)
+ 		dev_dbg(dev, "%s(%d, %zu)\n", __func__, hw_irq, size);
+ 
+ 		*state = SEND_MSG;
+-		memcpy(tx_sram_base, supplement, size);
++		memcpy_toio(tx_sram_base, supplement, size); /* ARMtix: iomem */
+ 		abox_gic_generate_interrupt(data->pdev_gic, hw_irq);
+ 		result = wait_event_timeout(data->ipc_wait_queue,
+ 				(*state == SEND_MSG_OK ||
+@@ -3921,7 +3921,7 @@ static bool abox_is_calliope_incompatible(struct platform_device *pdev)
+ 	ABOX_IPC_MSG msg;
+ 	struct IPC_SYSTEM_MSG *system_msg = &msg.msg.system;
+ 
+-	memcpy(&msg, data->sram_base + 0x30040, 0x3C);
++	memcpy_fromio(&msg, data->sram_base + 0x30040, 0x3C); /* ARMtix: iomem */
+ 
+ 	return ((system_msg->param3 >> 24) == 'A');
+ }
+@@ -4290,7 +4290,7 @@ static irqreturn_t abox_irq_handler(int irq, void *dev_id)
+ 	if (abox_dma_irq_handler(irq, data) == IRQ_HANDLED)
+ 		return IRQ_HANDLED;
+ 
+-	memcpy(&msg, data->sram_base + data->ipc_rx_offset, sizeof(msg));
++	memcpy_fromio(&msg, data->sram_base + data->ipc_rx_offset, sizeof(msg)); /* ARMtix: iomem */
+ 	writel(0, data->sram_base + data->ipc_rx_ack_offset);
+ 
+ 	dev_dbg(dev, "%s: irq=%d, ipcid=%d\n", __func__, irq, msg.ipcid);
+@@ -4617,7 +4617,7 @@ static int abox_download_firmware(struct platform_device *pdev)
+ 		return -EAGAIN;
+ 	}
+ 	memset_io(data->sram_base, 0, data->sram_size);
+-	memcpy(data->sram_base, data->firmware_sram->data,
++	memcpy_toio(data->sram_base, data->firmware_sram->data, /* ARMtix: iomem */
+ 			data->firmware_sram->size);
+ 
+ 	if (!data->firmware_dram) {

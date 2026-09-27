@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = onboard
+
+[Action]
+Description = Re-applying ARMtix onboard Python 3.12+ fix...
+When = PostTransaction
+Exec = /usr/local/sbin/onboard-py3-fix

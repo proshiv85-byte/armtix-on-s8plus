@@ -1,0 +1,138 @@
+#!/sbin/sh
+# ARMtix (Artix Linux aarch64) installer for Samsung Galaxy S8+ Exynos
+# (SM-G955F, dream2lte). Run from TWRP: Install -> this zip.
+#
+#  - FORMATS USERDATA (internal storage, sda27) as ext4 and installs the
+#    ARMtix root filesystem there. The SD card is not touched.
+#  - Copies the Samsung WiFi/audio firmware from this phone's SYSTEM
+#    partition (the zip contains no Samsung blobs).
+#  - Flashes the ARMtix kernel to BOOT.
+# Afterwards: TWRP -> Reboot -> System.
+
+OUTFD=$2
+ZIP=$3
+W=/tmp/armtix-install
+ROOT=/armtix_root
+SYSMNT=/armtix_system
+VENMNT=/armtix_vendor
+FS_UUID=1337beef-8d1a-4f00-b00b-c0ffee5a5a5a
+SWAP_MB=4096
+
+ui() { printf 'ui_print %s\nui_print\n' "$*" > /proc/self/fd/$OUTFD; }
+progress() { printf 'set_progress %s\n' "$1" > /proc/self/fd/$OUTFD; }
+cleanup() {
+	umount $SYSMNT 2>/dev/null; umount $VENMNT 2>/dev/null
+	umount $ROOT 2>/dev/null
+	rm -rf $W
+}
+abort() { ui " "; ui "!!! ERROR: $*"; ui "!!! Nothing was changed after this point."; cleanup; exit 1; }
+
+ui "=============================================="
+ui "  ARMtix Linux for Galaxy S8+ (dream2lte)"
+ui "=============================================="
+ui "              By tg:@Thereno1                 "
+
+rm -rf $W; mkdir -p $W
+unzip -o "$ZIP" armtix/busybox -d $W >/dev/null 2>&1 || abort "cannot unpack busybox"
+BB=$W/armtix/busybox
+chmod 755 $BB
+$BB unzip -o "$ZIP" armtix/boot.img armtix/caps.txt armtix/build-info \
+	armtix/sha256sums.boot armtix/sha256sums.rootfs -d $W >/dev/null 2>&1 \
+	|| abort "cannot unpack installer files"
+. $W/armtix/build-info 2>/dev/null
+ui "Build: ${BUILD_DATE:-?}  kernel ${KERNEL_VERSION:-?}"
+
+# ---------------------------------------------------------------- checks
+BL=$(getprop ro.boot.bootloader)
+[ -z "$BL" ] && BL=$(getprop ro.bootloader)
+case "$BL" in
+	G955F*) ui "Device: SM-G955F ($BL)" ;;
+	*) abort "this zip is only for the Galaxy S8+ Exynos (SM-G955F); bootloader is '$BL'" ;;
+esac
+BOOT=$(readlink -f /dev/block/by-name/BOOT)
+DATA=$(readlink -f /dev/block/by-name/USERDATA)
+SYSTEM=$(readlink -f /dev/block/by-name/SYSTEM)
+[ -b "$BOOT" ] || abort "BOOT partition not found"
+[ "$DATA" = /dev/block/sda27 ] || abort "USERDATA is '$DATA', the kernel expects /dev/block/sda27"
+
+ui "Verifying zip contents ..."
+( cd $W/armtix && $BB sha256sum -c sha256sums.boot >/dev/null 2>&1 ) || abort "boot.img checksum mismatch"
+RSUM=$($BB unzip -p "$ZIP" armtix/rootfs.tar.xz | $BB sha256sum | cut -d' ' -f1)
+[ "$RSUM" = "$(cut -d' ' -f1 $W/armtix/sha256sums.rootfs)" ] || abort "rootfs checksum mismatch (corrupt download?)"
+progress 0.10
+
+# ---------------------------------------------------------------- format
+ui " "
+ui "Formatting internal storage (USERDATA) as ext4 ..."
+for m in /sdcard /data/media /data /storage/emulated; do umount -l $m 2>/dev/null; done
+grep -q " /data " /proc/mounts && abort "/data is still mounted (busy)"
+MKE2FS=$(command -v mke2fs || echo /sbin/mke2fs)
+$MKE2FS -F -t ext4 -U $FS_UUID -L armtix $DATA >/dev/null 2>&1 || abort "mke2fs failed"
+mkdir -p $ROOT
+mount -t ext4 $DATA $ROOT || abort "cannot mount new filesystem"
+progress 0.15
+
+# ---------------------------------------------------------------- rootfs
+ui "Installing the root filesystem (a few minutes) ..."
+$BB unzip -p "$ZIP" armtix/rootfs.tar.xz | $BB unxz -c | $BB tar -xpf - -C $ROOT \
+	|| abort "extracting the root filesystem failed"
+[ -x $ROOT/usr/bin/openrc-init ] || abort "root filesystem incomplete"
+progress 0.70
+
+ui "Restoring file capabilities ..."
+while read -r path caps; do
+	[ -n "$path" ] && chroot $ROOT /usr/bin/setcap "$caps" "$path" 2>/dev/null
+done < $W/armtix/caps.txt
+
+# ---------------------------------------------------------------- firmware
+ui "Copying WiFi + audio firmware from SYSTEM ..."
+mkdir -p $SYSMNT $VENMNT
+mount -t ext4 -o ro $SYSTEM $SYSMNT 2>/dev/null || mount -o ro $SYSTEM $SYSMNT 2>/dev/null
+V=""
+for d in $SYSMNT/system/vendor $SYSMNT/vendor; do
+	[ -d $d/etc/wifi ] && { V=$d; break; }
+done
+if [ -z "$V" ] && [ -b /dev/block/by-name/VENDOR ]; then
+	mount -o ro /dev/block/by-name/VENDOR $VENMNT 2>/dev/null && [ -d $VENMNT/etc/wifi ] && V=$VENMNT
+fi
+if [ -n "$V" ]; then
+	mkdir -p $ROOT/vendor/etc $ROOT/vendor/firmware
+	cp -a $V/etc/wifi $ROOT/vendor/etc/ && ui "  WiFi firmware: ok"
+	n=0
+	for f in $V/firmware/calliope_*.bin $V/firmware/dsm*.bin $V/firmware/SoundBoosterParam.bin \
+	         $V/firmware/vts.bin $SYSMNT/system/etc/firmware/cs47l9* $V/firmware/cs47l9*; do
+		[ -f "$f" ] && cp "$f" $ROOT/vendor/firmware/ && n=$((n+1))
+	done
+	ui "  audio firmware: $n files"
+	[ -f $ROOT/vendor/firmware/calliope_sram.bin ] || ui "  WARNING: ABOX firmware missing - no sound"
+else
+	ui "  WARNING: no Samsung vendor files on SYSTEM - WiFi and sound won't work."
+	ui "  (Flash a stock/Samsung-based ROM's SYSTEM first, then re-run this zip.)"
+fi
+umount $SYSMNT 2>/dev/null; umount $VENMNT 2>/dev/null
+progress 0.80
+
+# ---------------------------------------------------------------- swap
+ui "Creating ${SWAP_MB} MB swap file ..."
+$BB dd if=/dev/zero of=$ROOT/swapfile bs=1M count=$SWAP_MB 2>/dev/null \
+	&& chmod 600 $ROOT/swapfile && $BB mkswap $ROOT/swapfile >/dev/null 2>&1 \
+	|| ui "  WARNING: swap file creation failed"
+progress 0.90
+sync
+umount $ROOT || { sync; umount -l $ROOT; }
+
+# ---------------------------------------------------------------- kernel
+ui "Flashing the ARMtix kernel to BOOT ..."
+$BB dd if=$W/armtix/boot.img of=$BOOT bs=1M 2>/dev/null || abort "writing BOOT failed"
+sync
+SZ=$($BB wc -c < $W/armtix/boot.img)
+BSUM=$($BB head -c $SZ $BOOT | $BB sha256sum | cut -d' ' -f1)
+[ "$BSUM" = "$(cut -d' ' -f1 $W/armtix/sha256sums.boot)" ] || abort "BOOT verification failed - re-flash!"
+progress 1.0
+
+ui " "
+ui "Done!  Now: Reboot -> System"
+ui "  login: armtix / armtix   (root / armtix)"
+ui "  Note: a cold power-on starts TWRP - use Reboot -> System."
+cleanup
+exit 0

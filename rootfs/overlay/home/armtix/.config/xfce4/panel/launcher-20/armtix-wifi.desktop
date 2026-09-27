@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Wi-Fi
+Comment=Connect to a WiFi network
+Exec=/usr/local/bin/armtix-wifi
+Icon=network-wireless
+Categories=Settings;Network;

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Onboard 1.4.1's C helper keysym_from_unicode() uses the "u" arg format that
+# Python >= 3.12 removed ("SystemError: bad format char"), so typing fails.
+# Replace the two calls with the X11 rule: Latin-1 maps to itself, anything
+# else is 0x01000000 + codepoint. Idempotent; run by a pacman hook.
+for f in /usr/lib/python3*/site-packages/Onboard/Keyboard.py; do
+	[ -f "$f" ] || continue
+	grep -q "_keysym_from_unicode(char)" "$f" && continue
+	sed -i 's/keysym = self\._vk\.keysym_from_unicode(char)/keysym = _keysym_from_unicode(char)/' "$f"
+	cat >> "$f" <<'PY'
+
+
+def _keysym_from_unicode(char):
+    # ARMtix: python replacement for osk keysym_from_unicode (py>=3.12)
+    cp = ord(char)
+    if 0x20 <= cp <= 0x7e or 0xa0 <= cp <= 0xff:
+        return cp
+    return 0x01000000 | cp
+PY
+	echo "patched $f"
+done

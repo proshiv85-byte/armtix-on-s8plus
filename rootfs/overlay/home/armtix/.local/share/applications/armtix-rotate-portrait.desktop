@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Rotate: portrait (USB down)
+Comment=Rotate the screen (restarts the desktop session)
+Exec=/usr/local/bin/armtix-rotate normal
+Icon=object-rotate-right
+Categories=Settings;DesktopSettings;

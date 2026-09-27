@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Rotate: landscape (USB right)
+Comment=Rotate the screen (restarts the desktop session)
+Exec=/usr/local/bin/armtix-rotate right
+Icon=object-rotate-right
+Categories=Settings;DesktopSettings;

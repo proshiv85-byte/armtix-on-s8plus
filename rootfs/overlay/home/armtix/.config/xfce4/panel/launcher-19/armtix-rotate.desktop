@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Rotate screen (portrait / landscape)
+Comment=Rotate the screen (restarts the desktop session)
+Exec=/usr/local/bin/armtix-rotate next
+Icon=object-rotate-right
+Categories=Settings;DesktopSettings;

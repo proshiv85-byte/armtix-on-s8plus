@@ -1,0 +1,13 @@
+#!/usr/bin/openrc-run
+# Create /run/user/<uid> (XDG_RUNTIME_DIR) for regular users before any login.
+# elogind/pam_rundir would do this; elogind can't run on the 4.4 kernel.
+description="Per-user runtime directories"
+depend() { need localmount; before agetty.tty1 local; }
+start() {
+	ebegin "Creating /run/user directories"
+	awk -F: '$3 >= 1000 && $3 < 60000 { print $1, $3 }' /etc/passwd |
+	while read -r u uid; do
+		install -d -m 700 -o "$u" -g "$(id -g "$u")" "/run/user/$uid"
+	done
+	eend 0
+}

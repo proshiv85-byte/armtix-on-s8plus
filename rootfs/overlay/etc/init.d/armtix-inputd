@@ -1,0 +1,22 @@
+#!/usr/bin/openrc-run
+# Hotplug for USB (OTG) keyboards/mice: forwards them into two permanent
+# uinput devices that Xorg opens at start (no udev on this kernel).
+description="USB keyboard/mouse hotplug for Xorg"
+command=/usr/local/sbin/armtix-inputd
+supervisor=supervise-daemon
+output_log=/var/log/armtix-inputd.log
+error_log=/var/log/armtix-inputd.log
+
+depend() {
+	need localmount
+	before agetty.tty1
+}
+
+start_post() {
+	# Xorg needs both device nodes to exist when it starts
+	for i in $(seq 1 50); do
+		[ -e /dev/input/armtix-kbd ] && [ -e /dev/input/armtix-mouse ] && return 0
+		sleep 0.1
+	done
+	ewarn "virtual input devices not created"
+}

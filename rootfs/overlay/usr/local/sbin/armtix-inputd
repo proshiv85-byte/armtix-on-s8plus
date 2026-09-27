@@ -1,0 +1,186 @@
+#!/usr/bin/python3
+"""armtix-inputd: hotplug for USB keyboards/mice without udev.
+
+Xorg can't hot-add input devices here (no udev -> AutoAddDevices false), so
+this daemon creates two permanent uinput devices that Xorg opens at start:
+  /dev/input/armtix-kbd    (virtual keyboard, with LEDs)
+  /dev/input/armtix-mouse  (virtual relative mouse + wheels + buttons)
+and forwards events from any USB input device plugged in later (OTG).
+"""
+import fcntl, os, selectors, struct, sys, time
+import evdev
+from evdev import InputDevice, ecodes as e
+
+KBD_LINK, MOUSE_LINK = "/dev/input/armtix-kbd", "/dev/input/armtix-mouse"
+MOUSE_BTNS = range(e.BTN_MISC, e.KEY_OK)          # 0x100..0x15f: mouse/joy buttons
+
+
+def log(*a):
+    print("armtix-inputd:", *a, flush=True)
+
+
+class LegacyUInput:
+    """uinput via the pre-4.5 interface (write uinput_user_dev + UI_DEV_CREATE).
+    python-evdev 2.x only uses UI_DEV_SETUP, which this 4.4 kernel lacks."""
+    UI_DEV_CREATE = 0x5501
+    UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT, UI_SET_LEDBIT = (
+        0x40045564, 0x40045565, 0x40045566, 0x40045569)
+    EV_FMT = "llHHi"                       # struct input_event (64-bit)
+    EV_SIZE = struct.calcsize(EV_FMT)
+
+    def __init__(self, caps, name):
+        self.fd = os.open("/dev/uinput", os.O_RDWR | os.O_NONBLOCK)
+        setbit = {e.EV_KEY: self.UI_SET_KEYBIT, e.EV_REL: self.UI_SET_RELBIT,
+                  e.EV_LED: self.UI_SET_LEDBIT}
+        fcntl.ioctl(self.fd, self.UI_SET_EVBIT, e.EV_SYN)
+        for evtype, codes in caps.items():
+            fcntl.ioctl(self.fd, self.UI_SET_EVBIT, evtype)
+            for c in codes:
+                fcntl.ioctl(self.fd, setbit[evtype], c)
+        # struct uinput_user_dev: name[80], input_id(4 x u16), ff_effects_max,
+        # absmax/absmin/absfuzz/absflat[64]
+        dev = struct.pack("80sHHHHI", name.encode()[:79], 0x03, 0x1d6b, 0x0104, 1, 0)
+        os.write(self.fd, dev + b"\0" * (4 * 64 * 4))
+        fcntl.ioctl(self.fd, self.UI_DEV_CREATE)
+        buf = fcntl.ioctl(self.fd, 0x8041552C, b"\0" * 65)   # UI_GET_SYSNAME(65)
+        sysname = buf.split(b"\0", 1)[0].decode()
+        self.path = None
+        for _ in range(50):
+            try:
+                ev = [n for n in os.listdir(f"/sys/class/input/{sysname}")
+                      if n.startswith("event")]
+            except FileNotFoundError:
+                ev = []
+            if ev and os.path.exists(f"/dev/input/{ev[0]}"):
+                self.path = f"/dev/input/{ev[0]}"
+                break
+            time.sleep(0.1)
+
+    def write(self, etype, code, value):
+        os.write(self.fd, struct.pack(self.EV_FMT, 0, 0, etype, code, value))
+
+    def syn(self):
+        self.write(e.EV_SYN, e.SYN_REPORT, 0)
+
+    def read(self):
+        try:
+            data = os.read(self.fd, self.EV_SIZE * 64)
+        except BlockingIOError:
+            return []
+        out = []
+        for i in range(0, len(data) - self.EV_SIZE + 1, self.EV_SIZE):
+            _, _, t, c, v = struct.unpack_from(self.EV_FMT, data, i)
+            out.append(evdev.InputEvent(0, 0, t, c, v))
+        return out
+
+
+def make_virtual():
+    keys = [c for c in range(1, 0x2ff) if c not in MOUSE_BTNS]
+    kbd = LegacyUInput({e.EV_KEY: keys, e.EV_LED: [e.LED_NUML, e.LED_CAPSL, e.LED_SCROLLL]},
+                       "ARMtix virtual keyboard")
+    mouse = LegacyUInput({e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE, e.BTN_SIDE,
+                                     e.BTN_EXTRA, e.BTN_FORWARD, e.BTN_BACK, e.BTN_TASK],
+                          e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL]},
+                         "ARMtix virtual mouse")
+    for ui, link in ((kbd, KBD_LINK), (mouse, MOUSE_LINK)):
+        path = ui.path
+        tmp = link + ".tmp"
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        os.symlink(path, tmp)
+        os.replace(tmp, link)
+        log("created", link, "->", path)
+    return kbd, mouse
+
+
+def is_candidate(dev):
+    if dev.name.startswith("ARMtix virtual"):
+        return False
+    # only external (USB) devices; built-in touchscreen/keys are used directly
+    phys = (dev.phys or "").lower()
+    return "usb" in phys
+
+
+def main():
+    kbd, mouse = make_virtual()
+    sel = selectors.DefaultSelector()
+    sel.register(kbd.fd, selectors.EVENT_READ, "kbd-led")
+    devs = {}                      # path -> InputDevice
+    pending = {id(kbd): False, id(mouse): False}
+    last_scan = 0.0
+
+    while True:
+        now = time.monotonic()
+        if now - last_scan >= 1.0:
+            last_scan = now
+            for path in evdev.list_devices():
+                if path in devs:
+                    continue
+                try:
+                    dev = InputDevice(path)
+                except OSError:
+                    continue
+                if not is_candidate(dev):
+                    dev.close()
+                    devs[path] = None          # remember, don't reopen
+                    continue
+                try:
+                    dev.grab()
+                except OSError:
+                    pass
+                devs[path] = dev
+                sel.register(dev.fd, selectors.EVENT_READ, dev)
+                log("attached", path, repr(dev.name), dev.phys)
+            # forget vanished nodes so a re-plugged device is picked up again
+            for path in [p for p in devs if not os.path.exists(p)]:
+                devs.pop(path)
+
+        for key, _ in sel.select(timeout=0.5):
+            src = key.data
+            if src == "kbd-led":             # LED state from X -> real keyboards
+                for ev in kbd.read():
+                    if ev.type == e.EV_LED:
+                        for d in devs.values():
+                            if d is not None:
+                                try:
+                                    d.set_led(ev.code, ev.value)
+                                except OSError:
+                                    pass
+                continue
+            dev = src
+            try:
+                events = list(dev.read())
+            except OSError:
+                log("detached", dev.path)
+                sel.unregister(dev.fd)
+                devs[dev.path] = None
+                try:
+                    dev.close()
+                except OSError:
+                    pass
+                continue
+            for ev in events:
+                if ev.type == e.EV_KEY:
+                    tgt = mouse if ev.code in MOUSE_BTNS else kbd
+                elif ev.type == e.EV_REL:
+                    tgt = mouse
+                elif ev.type == e.EV_SYN:
+                    for ui in (kbd, mouse):
+                        if pending[id(ui)]:
+                            ui.syn()
+                            pending[id(ui)] = False
+                    continue
+                else:
+                    continue                     # MSC scancodes, ABS, etc.
+                try:
+                    tgt.write(ev.type, ev.code, ev.value)
+                    pending[id(tgt)] = True
+                except (OSError, ValueError):
+                    pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

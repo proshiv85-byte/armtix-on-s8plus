@@ -1,0 +1,7 @@
+#!/bin/sh
+# armtix-rotate [normal|right|left|inverted|next]
+# fbdev can only rotate when X starts: set the orientation, then restart the
+# XFCE session (autologin brings it straight back). Open windows are closed.
+sudo -n /usr/local/sbin/armtix-set-rotation "${1:-next}" || {
+	notify-send "Rotate" "armtix-set-rotation failed" 2>/dev/null; exit 1; }
+exec xfce4-session-logout --logout --fast

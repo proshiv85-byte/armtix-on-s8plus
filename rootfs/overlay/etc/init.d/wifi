@@ -1,0 +1,39 @@
+#!/usr/bin/openrc-run
+# ARMtix WiFi: bcmdhd4361 (firmware in /vendor/etc/wifi) + wpa_supplicant.
+# Addressing is done by the dhcpcd service (/etc/dhcpcd.conf: nodev,
+# allowinterfaces wlan0) - it can't discover wlan0 via udev on this kernel,
+# so we poke it explicitly once associated. Networks:
+# /etc/wpa_supplicant/wpa_supplicant.conf (or `wpa_cli` at runtime).
+
+description="WiFi (wlan0 + wpa_supplicant)"
+pidfile=/run/wpa_supplicant-wlan0.pid
+
+depend() {
+	need localmount
+	# wlan0 only gets its real MAC when the firmware loads (ip link up);
+	# dhcpcd must not see the interface before that, or it keeps DHCPing
+	# from Broadcom's placeholder MAC (00:90:4c:...) and never gets a reply.
+	before dhcpcd net
+}
+
+start() {
+	ebegin "Starting WiFi (wlan0)"
+	ip link set wlan0 up || { eend 1 "wlan0 up failed (firmware?)"; return 1; }
+	wpa_supplicant -B -i wlan0 -D nl80211 -P "$pidfile" \
+		-c /etc/wpa_supplicant/wpa_supplicant.conf -f /var/log/wpa_supplicant.log
+	eend $? || return 1
+	# don't block boot waiting for association
+	( for t in $(seq 1 30); do
+		wpa_cli -i wlan0 status 2>/dev/null | grep -q '^wpa_state=COMPLETED' && break
+		sleep 1
+	  done
+	  pgrep -f 'dhcpcd: \[manager\]' >/dev/null && dhcpcd -n wlan0 >/dev/null 2>&1 ) &
+}
+
+stop() {
+	ebegin "Stopping WiFi (wlan0)"
+	dhcpcd -k wlan0 >/dev/null 2>&1
+	start-stop-daemon --stop --pidfile "$pidfile" --exec /usr/bin/wpa_supplicant
+	ip link set wlan0 down
+	eend 0
+}

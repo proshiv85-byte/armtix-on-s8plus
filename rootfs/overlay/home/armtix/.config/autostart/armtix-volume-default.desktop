@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Default volume (first login)
+Exec=sh -c 'f=$HOME/.config/armtix-volume-set; [ -e "$f" ] && exit 0; sleep 4; pactl set-sink-volume speaker 30%% && touch "$f"'
+NoDisplay=true

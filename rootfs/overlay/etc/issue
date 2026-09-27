@@ -1,0 +1,6 @@
+ARMtix Linux (OpenRC) — Samsung Galaxy S8+ (dream2lte / SM-G955F / Exynos 8895)
+
+Supported: display console, USB charging, USB networking (NCM), SSH.
+Not supported yet: Wi-Fi, audio, modem, Bluetooth, GPS, camera.
+
+root password: armtix  (autologin is enabled on the console)

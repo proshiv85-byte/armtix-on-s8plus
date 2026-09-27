@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Gdk" type="empty">
+    <property name="WindowScalingFactor" type="int" value="2"/>
+  </property>
+  <property name="Xft" type="empty">
+    <property name="DPI" type="int" value="120"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="CursorThemeSize" type="int" value="48"/>
+  </property>
+</channel>

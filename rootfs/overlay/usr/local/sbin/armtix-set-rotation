@@ -1,0 +1,30 @@
+#!/bin/sh
+# armtix-set-rotation normal|right|left|inverted|next
+# Writes the fbdev "Rotate" option and the matching touchscreen
+# TransformationMatrix into the Xorg config. Takes effect at next X start.
+# (root; armtix may run it via sudo without password, see sudoers.d)
+set -e
+CONF=/etc/X11/xorg.conf.d/10-armtix-dream2lte.conf
+STATE=/etc/X11/armtix-rotation
+cur=$(cat "$STATE" 2>/dev/null || echo normal)
+want=${1:-next}
+if [ "$want" = next ]; then
+	# two orientations: portrait (USB down) <-> landscape (USB right)
+	case $cur in normal) want=right;; *) want=normal;; esac
+fi
+# touch matrix maps panel-normalised (u,v) to rotated screen (x,y)
+case $want in
+	normal)   rot="";    m="1 0 0 0 1 0 0 0 1" ;;
+	right)    rot="CW";  m="0 1 0 -1 0 1 0 0 1" ;;
+	left)     rot="CCW"; m="0 -1 1 1 0 0 0 0 1" ;;
+	inverted) rot="UD";  m="-1 0 1 0 -1 1 0 0 1" ;;
+	*) echo "usage: $0 normal|right|left|inverted|next" >&2; exit 1 ;;
+esac
+if [ -n "$rot" ]; then
+	sed -i -E "s|^\s*#?\s*Option\s+\"Rotate\".*|\tOption     \"Rotate\" \"$rot\"|" "$CONF"
+else
+	sed -i -E "s|^\s*#?\s*Option\s+\"Rotate\".*|\t#Option    \"Rotate\" \"none\"|" "$CONF"
+fi
+sed -i -E "s|^\s*#?\s*Option\s+\"TransformationMatrix\".*|\tOption     \"TransformationMatrix\" \"$m\"|" "$CONF"
+echo "$want" > "$STATE"
+echo "$want"

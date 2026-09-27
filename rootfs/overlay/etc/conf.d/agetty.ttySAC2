@@ -1,0 +1,3 @@
+agetty_options="--autologin root"
+baud="115200"
+term_type="vt102"

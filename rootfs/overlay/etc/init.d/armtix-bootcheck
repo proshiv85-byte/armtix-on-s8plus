@@ -1,0 +1,27 @@
+#!/usr/bin/openrc-run
+description="ARMtix boot diagnostics log"
+depend() { after localmount; before sshd; }
+start() {
+  L=/root/bootcheck.log
+  {
+    echo "=== ARMtix boot $(date -u) ==="
+    uname -a
+    echo "--- battery:"; for f in status capacity voltage_now current_now; do printf '  %s=%s\n' "$f" "$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done
+    echo "--- fb0:"; cat /sys/class/graphics/fb0/name /sys/class/graphics/fb0/virtual_size /sys/class/graphics/fb0/state 2>/dev/null
+    echo "--- active consoles:"; cat /sys/class/tty/console/active 2>/dev/null; echo
+    echo "--- DEON/DPP/fb-console (clean):"
+    dmesg 2>/dev/null | grep -iE 'decon|fb console|DPP.*config|config DPP|dpp_err' | head -150
+    echo "--- live FDT (copied to /root/live.dtb):"; cp /sys/firmware/fdt /root/live.dtb 2>&1; wc -c /root/live.dtb
+    echo "--- usb dr_mode (live DT):"; find /proc/device-tree -name dr_mode -exec sh -c 'echo "$1: $(cat "$1")"' _ {} \; 2>/dev/null
+    dmesg > /root/dmesg-full.log 2>&1
+    echo "--- dmesg tail:"
+    dmesg 2>/dev/null | tail -15
+  } > "$L" 2>&1
+  # Live kernel log that survives a sudden power-off (RAM last_kmsg does
+  # not): stream /proc/kmsg to disk and sync every 2 s. Previous boot's log
+  # is kept as .prev.
+  mv -f /root/kmsg-live.log /root/kmsg-live.log.prev 2>/dev/null
+  ( dmesg > /root/kmsg-live.log; exec cat /proc/kmsg >> /root/kmsg-live.log ) >/dev/null 2>&1 &
+  ( while sleep 2; do sync /root/kmsg-live.log 2>/dev/null || sync; done ) >/dev/null 2>&1 &
+  eend 0
+}

@@ -1,0 +1,20 @@
+#!/bin/sh
+# armtix-volume up|down|mute  (bound to the phone's volume keys)
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+S=@DEFAULT_SINK@
+cur=$(pactl get-sink-volume $S | grep -o '[0-9]*%' | head -1 | tr -d %)
+case $1 in
+	up)   pactl set-sink-mute $S 0; n=$(( cur + 5 )); [ $n -gt 100 ] && n=100
+	      pactl set-sink-volume $S $n% ;;
+	down) n=$(( cur - 5 )); [ $n -lt 0 ] && n=0; pactl set-sink-volume $S $n% ;;
+	mute) pactl set-sink-mute $S toggle ;;
+esac
+vol=$(pactl get-sink-volume $S | grep -o '[0-9]*%' | head -1 | tr -d %)
+muted=$(pactl get-sink-mute $S | grep -q yes && echo 1)
+if [ -n "$muted" ] || [ "$vol" -eq 0 ]; then icon=audio-volume-muted
+elif [ "$vol" -lt 34 ]; then icon=audio-volume-low
+elif [ "$vol" -lt 67 ]; then icon=audio-volume-medium
+else icon=audio-volume-high; fi
+notify-send -t 1200 -i $icon -h int:value:$vol \
+	-h string:x-canonical-private-synchronous:armtix-volume \
+	"Volume" "${muted:+muted }$vol%" 2>/dev/null

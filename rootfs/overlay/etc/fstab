@@ -1,0 +1,4 @@
+# ARMtix on Samsung Galaxy S8+ (dream2lte)
+# Root filesystem lives on the UFS USERDATA partition (sda27).
+UUID=1337beef-8d1a-4f00-b00b-c0ffee5a5a5a	/		ext4		rw,relatime	0 0
+/swapfile	none		swap		defaults	0 0

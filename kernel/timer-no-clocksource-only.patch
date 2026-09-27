@@ -1,0 +1,13 @@
+diff --git a/arch/arm64/boot/dts/exynos/exynos8895.dtsi b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+index d85218c4..2526304b 100644
+--- a/arch/arm64/boot/dts/exynos/exynos8895.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos8895.dtsi
+@@ -579,7 +579,7 @@
+ 	                     <1 11 0xff01>,
+ 	                     <1 10 0xff01>;
+ 	        clock-frequency = <26000000>;
+-		use-clocksource-only;
++	//	use-clocksource-only;
+ 		use-physical-timer;
+ 	};
+ 

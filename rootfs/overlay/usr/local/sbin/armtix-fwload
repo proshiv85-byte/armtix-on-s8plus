@@ -1,0 +1,22 @@
+#!/bin/sh
+# Userspace firmware loader (what udev's firmware helper would do): answer the
+# kernel's CONFIG_FW_LOADER_USER_HELPER requests in /sys/class/firmware.
+# Needed because drivers (ABOX audio DSP, VTS) probe before the rootfs is
+# mounted, and udev doesn't run on this kernel. Missing files are cancelled
+# at once instead of blocking the driver for the 60 s timeout.
+DIRS="/vendor/firmware /lib/firmware/updates /lib/firmware"
+while :; do
+	for d in /sys/class/firmware/*/; do
+		[ -f "$d/loading" ] || continue
+		n=${d%/}; n=${n##*/}
+		f=""
+		for p in $DIRS; do [ -f "$p/$n" ] && { f="$p/$n"; break; }; done
+		if [ -n "$f" ]; then
+			echo 1 > "$d/loading" && cat "$f" > "$d/data" && echo 0 > "$d/loading" \
+				&& echo "armtix-fwload: loaded $n from $f" > /dev/kmsg
+		else
+			echo -1 > "$d/loading" && echo "armtix-fwload: $n not found, cancelled" > /dev/kmsg
+		fi
+	done
+	sleep 0.5
+done

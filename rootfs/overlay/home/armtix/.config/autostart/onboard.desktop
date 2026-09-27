@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Onboard
+Comment=On-screen keyboard (docked, Phone layout)
+Exec=onboard --startup-delay=2.0
+Icon=onboard
+X-GNOME-AutoRestart=true

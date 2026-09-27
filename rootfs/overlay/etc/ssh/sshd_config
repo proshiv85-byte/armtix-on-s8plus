@@ -1,0 +1,16 @@
+# sshd_config for ARMtix on dream2lte
+# Root login with the documented password is intentionally enabled;
+# this device is a text-console Linux port for a single operator.
+
+Port 22
+ListenAddress 0.0.0.0
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+UsePAM no
+X11Forwarding no
+PrintMotd yes
+AcceptEnv LANG LC_*
+Subsystem	sftp	/usr/lib/ssh/sftp-server

@@ -1,0 +1,2 @@
+agetty_options="--autologin armtix --noclear"
+term_type="linux"

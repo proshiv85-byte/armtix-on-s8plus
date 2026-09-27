@@ -1,0 +1,152 @@
+#!/bin/bash
+# armtix-wifi: tiny touch-friendly WiFi picker (yad + wpa_cli).
+# Talks to the wpa_supplicant started by the `wifi` service (control socket
+# group wheel). Networks are saved to wpa_supplicant.conf (update_config=1);
+# dhcpcd picks up the new link by itself.
+
+IF=wlan0
+W="wpa_cli -i $IF"
+TITLE="Wi-Fi"
+ICON=network-wireless
+
+err() { yad --title="$TITLE" --window-icon=$ICON --image=dialog-error \
+	--text="$1" --button=OK:0 --center 2>/dev/null; }
+
+if ! $W ping >/dev/null 2>&1; then
+	err "Can't talk to wpa_supplicant on $IF.\nIs the <b>wifi</b> service running?"
+	exit 1
+fi
+
+status_text() {
+	local st ssid ip
+	st=$($W status 2>/dev/null)
+	ssid=$(sed -n 's/^ssid=//p' <<<"$st")
+	ip=$(ip -4 -o addr show $IF 2>/dev/null | awk '{print $4}')
+	if grep -q '^wpa_state=COMPLETED' <<<"$st"; then
+		echo "Connected to <b>$(printf '%s' "$ssid" | sed 's/&/\&amp;/g; s/</\&lt;/g')</b>  ${ip:-(getting address…)}"
+	else
+		echo "Not connected ($(sed -n 's/^wpa_state=//p' <<<"$st"))"
+	fi
+}
+
+# prints: marker TAB ssid TAB signal% TAB security, strongest per SSID
+scan_list() {
+	$W scan >/dev/null 2>&1
+	sleep 3
+	local cur known
+	cur=$($W status 2>/dev/null | sed -n 's/^ssid=//p')
+	known=$($W list_networks 2>/dev/null | tail -n +2 | cut -f2)
+	$W scan_results 2>/dev/null | tail -n +2 |
+	awk -F'\t' '$5 != "" && $5 !~ /^\\x00/ {
+		if (!($5 in best) || $3 > best[$5]) { best[$5]=$3; flags[$5]=$4 } }
+		END { for (s in best) printf "%s\t%s\t%s\n", best[s], s, flags[s] }' |
+	sort -t$'\t' -k1,1nr |
+	while IFS=$'\t' read -r dbm ssid flags; do
+		q=$(( 2 * (dbm + 100) )); [ $q -gt 100 ] && q=100; [ $q -lt 0 ] && q=0
+		case $flags in *WPA3*|*SAE*) sec="WPA3";; *WPA2*|*RSN*) sec="WPA2";;
+			*WPA*) sec="WPA";; *WEP*) sec="WEP";; *) sec="open";; esac
+		mark=""
+		[ "$ssid" = "$cur" ] && mark="●"
+		[ -z "$mark" ] && grep -qxF -- "$ssid" <<<"$known" && mark="saved"
+		printf '%s\n%s\n%s\n%s\n' "$mark" "$ssid" "$q%" "$sec"
+	done
+}
+
+net_id() {  # id of a saved network with this SSID
+	$W list_networks 2>/dev/null | tail -n +2 |
+		awk -F'\t' -v s="$1" '$2 == s { print $1; exit }'
+}
+
+# usable screen area in GTK units (excludes panel + docked keyboard)
+geometry() {
+	local wa scale=${GDK_SCALE:-1}
+	wa=$(xprop -root _NET_WORKAREA 2>/dev/null | sed 's/.*= //' | cut -d, -f1-4 | tr -d ' ')
+	[ -n "$wa" ] || { echo "--width=600 --height=600 --center"; return; }
+	IFS=, read -r x y w h <<<"$wa"
+	# minus title bar + the (non-reserving) bottom dock
+	echo "--geometry=$((w/scale))x$((h/scale - 90))+$((x/scale))+$((y/scale))"
+}
+
+hexssid() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+
+connect() {
+	local ssid=$1 sec=$2 id pass
+	id=$(net_id "$ssid")
+	if [ -z "$id" ]; then
+		if [ "$sec" != open ]; then
+			pass=$(yad --title="$TITLE" --window-icon=$ICON --center \
+				--text="Password for <b>$ssid</b>:" \
+				--entry --hide-text --button=Cancel:1 --button=Connect:0 2>/dev/null) || return
+			if [ ${#pass} -lt 8 ] || [ ${#pass} -gt 63 ]; then
+				err "WPA passwords are 8–63 characters."; return
+			fi
+		fi
+		id=$($W add_network | tail -1)
+		$W set_network "$id" ssid "$(hexssid "$ssid")" >/dev/null
+		if [ "$sec" = open ]; then
+			$W set_network "$id" key_mgmt NONE >/dev/null
+		else
+			$W set_network "$id" psk "\"$pass\"" >/dev/null || {
+				$W remove_network "$id" >/dev/null; err "Invalid password."; return; }
+			[ "$sec" = WPA3 ] && $W set_network "$id" key_mgmt "SAE WPA-PSK" >/dev/null
+		fi
+	fi
+	# the network picked last gets the highest priority, so wpa_supplicant
+	# doesn't roam back to another saved one (and prefers it after reboot)
+	local prio
+	prio=$(for n in $($W list_networks | tail -n +2 | cut -f1); do
+		$W get_network "$n" priority; echo; done | sort -n | tail -1)  # (no trailing newline from wpa_cli)
+	$W set_network "$id" priority $(( ${prio:-0} + 1 )) >/dev/null
+	$W enable_network "$id" >/dev/null
+	$W select_network "$id" >/dev/null
+	# wait for association, then for dhcpcd's address on the new network
+	local old_ip
+	old_ip=$(ip -4 -o addr show $IF 2>/dev/null | awk '{print $4}')
+	(
+		for i in $(seq 1 20); do
+			echo $(( i * 2 )); echo "# Connecting to $ssid…"
+			$W status | grep -q "^ssid=$ssid\$" && \
+				$W status | grep -q '^wpa_state=COMPLETED' && break
+			sleep 1
+		done
+		for i in $(seq 1 30); do
+			echo $(( 40 + i * 2 )); echo "# Getting IP address…"
+			ip=$(ip -4 -o addr show $IF 2>/dev/null | awk '{print $4}')
+			[ -n "$ip" ] && [ "$ip" != "$old_ip" ] && break
+			sleep 1
+		done
+		echo 100
+	) | yad --progress --title="$TITLE" --window-icon=$ICON --center \
+		--text="<b>$ssid</b>" --auto-close --no-buttons 2>/dev/null
+	if $W status | grep -q '^wpa_state=COMPLETED'; then
+		$W save_config >/dev/null
+		$W enable_network all >/dev/null   # keep other saved networks usable
+	else
+		# wrong password / out of range: drop a network we just added
+		[ -n "$pass" ] && $W remove_network "$id" >/dev/null
+		$W enable_network all >/dev/null
+		err "Could not connect to <b>$ssid</b>.\nWrong password or weak signal?"
+	fi
+}
+
+while :; do
+	sel=$(scan_list | yad --list --title="$TITLE" --window-icon=$ICON \
+		$(geometry) --fixed \
+		--text="$(status_text)\n\nTap a network, then a button:" \
+		--column=" " --column=Network --column=Signal --column=Security \
+		--print-column=0 --separator=$'\t' \
+		--button="Refresh:2" --button="Forget:3" \
+		--button="Disconnect:4" --button="Close:1" \
+		--button="Connect:0" 2>/dev/null)
+	rc=$?
+	ssid=$(cut -f2 <<<"$sel"); sec=$(cut -f4 <<<"$sel")
+	case $rc in
+		0) [ -n "$ssid" ] && connect "$ssid" "$sec" ;;
+		2) ;;
+		3) if [ -n "$ssid" ] && id=$(net_id "$ssid") && [ -n "$id" ]; then
+			   $W remove_network "$id" >/dev/null; $W save_config >/dev/null
+		   fi ;;
+		4) $W disconnect >/dev/null ;;   # Connect (select_network) reconnects
+		*) exit 0 ;;
+	esac
+done

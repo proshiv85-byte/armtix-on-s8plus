@@ -1,0 +1,22 @@
+# Android userspace pieces libhybris needs on ARMtix: a hybris-patched bionic
+# (the stock one collides with glibc's TLS) and the system libraries the Mali
+# driver and gralloc load. Taken from the Halium 16 arm64 GSI (see PROVENANCE);
+# the device-specific half (/vendor/lib64) comes from the phone's own VENDOR
+# partition and is not packaged.
+pkgname=armtix-hybris-gsi
+pkgver=16.0.20261009
+pkgrel=1
+pkgdesc="Hybris-patched Android bionic + system libraries (Halium 16 GSI subset) for libhybris"
+arch=(aarch64)
+url="https://github.com/Halium/hybris-patches"
+license=(Apache-2.0 BSD-2-Clause)
+options=(!strip !debug)
+source=(halium-16.0-gsi-hybris-subset.tar.zst PROVENANCE)
+noextract=(halium-16.0-gsi-hybris-subset.tar.zst)
+sha256sums=('cbdc368fdf5a0c04b12f7da8d01aac9ff48693abf36bcfb48bdb7b7a808260f8'
+            'SKIP')
+
+package() {
+	bsdtar -xf halium-16.0-gsi-hybris-subset.tar.zst -C "$pkgdir"
+	install -Dm644 PROVENANCE -t "$pkgdir/usr/share/doc/$pkgname/"
+}

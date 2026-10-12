@@ -1,0 +1,17 @@
+#!/bin/sh
+# armtix-osk start|toggle|show|hide  - on-screen keyboard (wvkbd) for sway
+# wvkbd stays running hidden; signals switch it (SIGUSR1 hide, SIGUSR2 show,
+# SIGRTMIN toggle).
+K=wvkbd-mobintl
+running() { pgrep -u "$(id -u)" -x $K >/dev/null; }
+start() {
+	running || setsid -f $K --hidden -H 280 -L 200 \
+		--fn "Sans 12" >/dev/null 2>&1
+}
+case ${1:-toggle} in
+	start)  start ;;
+	toggle) running && pkill -RTMIN -u "$(id -u)" -x $K || { start; sleep 0.3; pkill -USR2 -u "$(id -u)" -x $K; } ;;
+	show)   start; sleep 0.3; pkill -USR2 -u "$(id -u)" -x $K ;;
+	hide)   pkill -USR1 -u "$(id -u)" -x $K ;;
+	*) echo "usage: $0 start|toggle|show|hide" >&2; exit 1 ;;
+esac

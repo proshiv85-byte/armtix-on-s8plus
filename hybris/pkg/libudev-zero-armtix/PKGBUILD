@@ -1,0 +1,26 @@
+# libudev without a udev daemon, for the sway session only: systemd-udevd
+# doesn't run on the 4.4 kernel, so libinput finds no devices through the real
+# libudev (no ID_INPUT_* properties). libudev-zero derives them from sysfs.
+# Installed to a private directory, used via LD_LIBRARY_PATH by armtix-sway.
+pkgname=libudev-zero-armtix
+pkgver=1.0.5
+pkgrel=1
+pkgdesc="Daemonless replacement for libudev (private copy for the ARMtix sway session)"
+arch=(aarch64)
+url="https://github.com/illiliti/libudev-zero"
+license=(ISC)
+depends=(glibc)
+makedepends=(git)
+source=("libudev-zero::git+https://github.com/illiliti/libudev-zero.git#tag=$pkgver")
+sha256sums=('SKIP')
+
+build() {
+	cd libudev-zero
+	make PREFIX=/usr
+}
+
+package() {
+	cd libudev-zero
+	install -Dm755 libudev.so.1 "$pkgdir/usr/lib/libudev-zero/libudev.so.1"
+	install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

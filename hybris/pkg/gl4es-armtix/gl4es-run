@@ -1,0 +1,10 @@
+#!/bin/sh
+# gl4es-run <command...>: desktop OpenGL (up to 2.1) translated to OpenGL ES 2
+# by gl4es, on the Mali GPU through libhybris. For Wayland EGL apps.
+[ $# -gt 0 ] || { echo "usage: gl4es-run <command> [args...]" >&2; exit 1; }
+export LD_LIBRARY_PATH=/usr/lib/gl4es${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+# gl4es loads the real libEGL by path; preloading its EGL wrapper makes sure
+# apps that dlopen("libEGL.so.1") (GLFW, ...) get the wrapper, not the real one
+export LD_PRELOAD=/usr/lib/gl4es/libEGL.so.1${LD_PRELOAD:+:$LD_PRELOAD}
+export LIBGL_EGL=/usr/lib/libEGL.so.1 LIBGL_GLES=/usr/lib/libGLESv2.so.2
+exec hybris-run "$@"

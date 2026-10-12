@@ -1,0 +1,55 @@
+# gl4es for ARMtix: desktop OpenGL (up to 2.1) on top of OpenGL ES 2, i.e. on
+# the Mali GPU through libhybris. Not installed as the system libGL (Mesa stays
+# the default); programs opt in with
+#   gl4es-run <app>      Wayland/EGL apps (incl. Minecraft with LWJGL 3/GLFW)
+#   gl4es-x11-run <app>  X11/GLX apps under Xwayland (renders to a pbuffer and
+#                        copies frames to the window: works, but slow)
+pkgname=gl4es-armtix
+pkgver=1.1.7.r20261004.ec16bed
+pkgrel=1
+pkgdesc="OpenGL 2.1 on OpenGL ES 2 (gl4es) for the Mali GPU via libhybris"
+arch=(aarch64)
+url="https://github.com/ptitSeb/gl4es"
+license=(MIT)
+depends=(glibc libglvnd libhybris-armtix libx11)
+makedepends=(git cmake python)
+_commit=ec16bedd8819c475326f4f1a3063772c6d986e06
+source=("gl4es::git+https://github.com/ptitSeb/gl4es.git#commit=$_commit"
+        gl4es-armtix.patch
+        gl4es-run
+        gl4es-x11-run)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+	cd gl4es
+	patch -Np1 -i ../gl4es-armtix.patch
+}
+
+_build() { # builddir, extra cmake args...
+	local dir=$1; shift
+	# GCC >= 14 turns these into errors; gl4es still has a few of them
+	cmake -S gl4es -B "$dir" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+		-DHYBRIS=ON -DDEFAULT_ES=2 \
+		-DDEFAULT_EGL=/usr/lib/libEGL.so.1 -DDEFAULT_GLES=/usr/lib/libGLESv2.so.2 \
+		-DCMAKE_C_FLAGS="$CFLAGS -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=return-mismatch" \
+		"$@"
+	# gl4es writes its libraries to the source tree's lib/
+	rm -rf gl4es/lib && mkdir -p gl4es/lib
+	cmake --build "$dir"
+	mkdir -p "$dir/out" && cp -a gl4es/lib/. "$dir/out/"
+}
+
+build() {
+	# EGL wrapper variant (libGL + libEGL), no X11
+	_build build-egl -DNOX11=ON -DEGL_WRAPPER=ON
+	# GLX variant for X11 apps, rendering to a pbuffer (LIBGL_FB=3)
+	_build build-x11 -DDEFAULT_FB=3
+}
+
+package() {
+	install -Dm755 build-egl/out/libGL.so.1 "$pkgdir/usr/lib/gl4es/libGL.so.1"
+	install -Dm755 build-egl/out/libEGL.so.1 "$pkgdir/usr/lib/gl4es/libEGL.so.1"
+	install -Dm755 build-x11/out/libGL.so.1 "$pkgdir/usr/lib/gl4es-x11/libGL.so.1"
+	install -Dm755 gl4es-run gl4es-x11-run -t "$pkgdir/usr/bin/"
+	install -Dm644 gl4es/LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

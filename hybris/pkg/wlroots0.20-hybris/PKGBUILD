@@ -1,0 +1,43 @@
+# wlroots 0.20 for ARMtix on the Galaxy S8+: drop-in replacement of
+# wlroots0.20 (sway links against it) with
+#  - an fbdev backend: the Exynos decon display only has /dev/fb0, no KMS;
+#    used automatically when there is no DRM device (or WLR_BACKENDS=fbdev)
+#  - GLES2 rendering on the Android Mali driver through libhybris: gralloc
+#    render buffers and GPU clients sharing buffers via wayland-android
+pkgname=wlroots0.20-hybris
+pkgver=0.20.2
+pkgrel=2
+pkgdesc="Modular Wayland compositor library, with fbdev backend and libhybris GPU rendering"
+arch=(aarch64)
+url="https://gitlab.freedesktop.org/wlroots/wlroots"
+license=(MIT)
+depends=(glibc libdrm libglvnd libinput libpixman-1.so libseat.so libudev.so
+         libwayland-server.so libxkbcommon.so libdisplay-info libliftoff lcms2
+         libxcb xcb-util-errors xcb-util-renderutil xcb-util-wm vulkan-icd-loader
+         mesa hwdata)
+makedepends=(glslang meson ninja vulkan-headers wayland-protocols xorg-xwayland)
+optdepends=('libhybris-armtix: GPU rendering with the Android Mali driver'
+            'xorg-xwayland: Xwayland support')
+provides=("wlroots0.20=$pkgver" libwlroots-0.20.so)
+conflicts=(wlroots0.20)
+source=("https://gitlab.freedesktop.org/wlroots/wlroots/-/releases/$pkgver/downloads/wlroots-$pkgver.tar.gz"
+        wlroots-0.20.2-hybris-fbdev.patch)
+sha256sums=('80c567d2ed4efb2cfa6b077f22c7a710d9c78ba4e185a75e8694001114af0733'
+            'SKIP')
+
+prepare() {
+	cd wlroots-$pkgver
+	patch -Np1 -i ../wlroots-0.20.2-hybris-fbdev.patch
+}
+
+build() {
+	arch-meson wlroots-$pkgver build \
+		-Dexamples=false -Dwerror=false -Dxwayland=enabled \
+		-Dbackends=drm,libinput,x11 -Drenderers=gles2,vulkan
+	meson compile -C build
+}
+
+package() {
+	meson install -C build --destdir "$pkgdir"
+	install -Dm644 wlroots-$pkgver/LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

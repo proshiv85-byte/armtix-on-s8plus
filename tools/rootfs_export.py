@@ -37,6 +37,8 @@ EXCLUDE = [
     "home/armtix/.config/mozilla", "home/armtix/.config/mozilla/*",
     "home/armtix/.config/Thunar", "home/armtix/.config/Thunar/*",
     "home/armtix/.config/armtix-volume-set",
+    "home/armtix/.config/lan-mouse", "home/armtix/.config/lan-mouse/*",   # authorized PC fingerprint
+    "home/armtix/.java", "home/armtix/.java/*",
     "home/armtix/.config/pulse/*",
     "home/armtix/.local/share/*", "home/armtix/.local/state/*",
     "home/armtix/Downloads/*", "home/armtix/Desktop/*",

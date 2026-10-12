@@ -1,0 +1,23 @@
+# On-screen keyboard for wlroots compositors (sway on the phone has no
+# physical keyboard). Not in the Artix/ARMtix repositories.
+pkgname=wvkbd
+pkgver=0.20
+pkgrel=1
+pkgdesc="On-screen virtual keyboard for wlroots-based Wayland compositors"
+arch=(aarch64)
+url="https://github.com/jjsullivan5196/wvkbd"
+license=(GPL-3.0-or-later)
+depends=(cairo glib2 harfbuzz libxkbcommon pango wayland)
+makedepends=(git scdoc wayland-protocols)
+source=("wvkbd::git+https://github.com/jjsullivan5196/wvkbd.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+build() {
+	cd wvkbd
+	make PREFIX=/usr
+}
+
+package() {
+	cd wvkbd
+	make PREFIX=/usr DESTDIR="$pkgdir" install
+}

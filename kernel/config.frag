@@ -24,3 +24,6 @@ CONFIG_RD_LZMA=y
 CONFIG_RD_XZ=y
 CONFIG_RD_LZO=y
 CONFIG_RD_LZ4=y
+# boot logo: one Tux per CPU (logo.c is patched so the late decon still gets it)
+CONFIG_LOGO=y
+CONFIG_LOGO_LINUX_CLUT224=y

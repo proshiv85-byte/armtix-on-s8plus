@@ -1,0 +1,38 @@
+diff --git a/src/egl/egl.c b/src/egl/egl.c
+index ec1e920..3701ef5 100644
+--- a/src/egl/egl.c
++++ b/src/egl/egl.c
+@@ -38,6 +38,10 @@ EGLBoolean gl4es_eglTerminate(EGLDisplay dpy) {
+ 
+ const char * gl4es_eglQueryString(EGLDisplay dpy, EGLint name) {
+     LOAD_EGL(eglQueryString);
++    // The driver only offers OpenGL ES, gl4es adds desktop OpenGL on top
++    // (GLFW checks this before creating an OpenGL context)
++    if (name == EGL_CLIENT_APIS && dpy != EGL_NO_DISPLAY)
++        return "OpenGL OpenGL_ES";
+     return egl_eglQueryString(dpy, name);
+ }
+ 
+@@ -48,7 +52,21 @@ EGLBoolean gl4es_eglGetConfigs(EGLDisplay dpy, EGLConfig *configs, EGLint config
+ 
+ EGLBoolean gl4es_eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig *configs, EGLint config_size, EGLint *num_config) {
+     LOAD_EGL(eglChooseConfig);
+-    return egl_eglChooseConfig(dpy, attrib_list, configs, config_size, num_config);
++    // Apps ask for desktop GL configs; the GLES driver only has GLES ones
++    EGLint attribs[128];
++    int n = 0;
++    if (attrib_list) {
++        for (; attrib_list[n] != EGL_NONE && n < 126; n += 2) {
++            attribs[n] = attrib_list[n];
++            attribs[n + 1] = attrib_list[n + 1];
++            if ((attribs[n] == EGL_RENDERABLE_TYPE || attribs[n] == EGL_CONFORMANT) &&
++                    (attribs[n + 1] & EGL_OPENGL_BIT))
++                attribs[n + 1] = (attribs[n + 1] & ~EGL_OPENGL_BIT) |
++                    ((hardext.esversion == 1) ? EGL_OPENGL_ES_BIT : EGL_OPENGL_ES2_BIT);
++        }
++    }
++    attribs[n] = EGL_NONE;
++    return egl_eglChooseConfig(dpy, attrib_list ? attribs : NULL, configs, config_size, num_config);
+ }
+ 
+ EGLBoolean gl4es_eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute, EGLint *value) {

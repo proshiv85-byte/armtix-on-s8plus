@@ -1,0 +1,319 @@
+diff --git a/hybris/common/hooks.c b/hybris/common/hooks.c
+index 67bbf31..d297ccf 100644
+--- a/hybris/common/hooks.c
++++ b/hybris/common/hooks.c
+@@ -3455,6 +3455,17 @@ void hybris_set_hook_callback(hybris_hook_cb callback)
+ #define STRINGIFY(x) QUOTE(x)
+ #define LINKER_VERSION_DEFAULT_STRING STRINGIFY(LINKER_VERSION_DEFAULT)
+ 
++/* No Android init (and so no bionic property area): bionic cannot read
++ * properties itself, so serve them from the libhybris property cache. */
++static int have_android_property_area()
++{
++    static int have = -1;
++
++    if (have < 0)
++        have = access("/dev/__properties__/property_info", F_OK) == 0;
++    return have;
++}
++
+ static int get_android_sdk_version()
+ {
+     static int sdk_version = -1;
+@@ -3564,7 +3575,7 @@ static void* __hybris_get_hooked_symbol(const char *sym, const char *requester)
+     // make sure to skip the property hooks only when o.so is actually loaded
+     // since for testing and we sometimes set things like 99 as sdk version.
+     // The o linker is loaded when sdk_version >= 27 and exists.
+-    if (!found && sdk_version < 27)
++    if (!found && (sdk_version < 27 || !have_android_property_area()))
+         found = bsearch(&key, hooks_properties, HOOKS_SIZE(hooks_properties), sizeof(hooks_properties[0]), hook_cmp);
+ 
+     if (!found)
+diff --git a/hybris/common/legacy_properties/cache.c b/hybris/common/legacy_properties/cache.c
+index 019b7db..7735805 100644
+--- a/hybris/common/legacy_properties/cache.c
++++ b/hybris/common/legacy_properties/cache.c
+@@ -35,7 +35,7 @@ struct hybris_prop_value
+ };
+ 
+ /* surely enough for anyone */
+-#define MAX_PROPS 1000
++#define MAX_PROPS 4000
+ 
+ /* the sorted prop array */
+ static struct hybris_prop_value prop_array[MAX_PROPS];
+@@ -52,9 +52,6 @@ static void cache_repopulate_internal(FILE *f);
+ static void cache_empty_internal();
+ static void cache_repopulate_cmdline_internal();
+ 
+-/* the inode/mtime of the prop cache, used for invalidation */
+-static ino_t static_prop_inode;
+-static time_t static_prop_mtime;
+ 
+ 
+ /* public:
+@@ -94,42 +91,62 @@ void hybris_propcache_list(hybris_propcache_list_cb cb, void *cookie)
+ 	}
+ }
+ 
++/* Property files, highest priority first (the first definition of a key
++ * wins). Without an Android property area (no Android init running) these
++ * are the only property source, so a distribution can set e.g.
++ * ro.board.platform in /etc/hybris/props.conf. */
++static const char *prop_files[] = {
++	"/etc/hybris/props.conf",
++	"/vendor/build.prop",
++	"/vendor/default.prop",
++	"/system/build.prop",
++};
++#define N_PROP_FILES (sizeof(prop_files) / sizeof(prop_files[0]))
++
++/* the inode/mtime of every prop file, used for invalidation */
++static ino_t prop_file_inode[N_PROP_FILES];
++static time_t prop_file_mtime[N_PROP_FILES];
++
+ static void cache_update()
+ {
+ 	struct stat st;
+-	FILE *f = fopen("/system/build.prop", "r");
++	int stale = 0;
++	unsigned int i;
+ 
+-	if (!f)
+-		return;
++	/* TODO: is there any better way to detect changes? */
++	for (i = 0; i < N_PROP_FILES; i++) {
++		ino_t ino = 0;
++		time_t mtime = 0;
+ 
+-	/* before searching, we must first determine whether our cache is valid. if
+-	 * it isn't, we must discard our results and re-create the cache.
+-	 *
+-	 * we use fstat here to avoid a race between stat and something else
+-	 * touching the file.
+-	 */
+-	if (fstat(fileno(f), &st) != 0) {
+-		perror("cache_find can't stat build.prop");
+-		goto out;
++		if (stat(prop_files[i], &st) == 0) {
++			ino = st.st_ino;
++			mtime = st.st_mtime;
++		}
++		if (prop_file_inode[i] != ino || prop_file_mtime[i] != mtime)
++			stale = 1;
++		prop_file_inode[i] = ino;
++		prop_file_mtime[i] = mtime;
+ 	}
+ 
+-	/* TODO: is there any better way to detect changes? */
+-	if (static_prop_inode != st.st_ino ||
+-		static_prop_mtime != st.st_mtime) {
+-		static_prop_inode = st.st_ino;
+-		static_prop_mtime = st.st_mtime;
++	if (!stale)
++		return;
+ 
+-		/* cache is stale. fill it back up with fresh data first. */
+-		cache_empty_internal();
+-		cache_repopulate_internal(f);
+-		cache_repopulate_cmdline_internal();
++	/* cache is stale. fill it back up with fresh data first. */
++	cache_empty_internal();
++	for (i = 0; i < N_PROP_FILES; i++) {
++		FILE *f = fopen(prop_files[i], "r");
+ 
+-		/* sort by keys */
++		if (!f)
++			continue;
++		cache_repopulate_internal(f);
++		fclose(f);
++		/* keep sorted so the first-match lookup in cache_add_internal works */
+ 		qsort(prop_array, max_prop, sizeof(struct hybris_prop_value), prop_qcmp);
+ 	}
++	cache_repopulate_cmdline_internal();
+ 
+-out:
+-	fclose(f);
++	/* sort by keys */
++	qsort(prop_array, max_prop, sizeof(struct hybris_prop_value), prop_qcmp);
+ }
+ 
+ /* private:
+diff --git a/hybris/egl/egl.c b/hybris/egl/egl.c
+index 0051d37..80928b6 100644
+--- a/hybris/egl/egl.c
++++ b/hybris/egl/egl.c
+@@ -232,7 +232,11 @@ EGLDisplay __eglHybrisGetPlatformDisplayCommon(EGLenum platform,
+ 		case EGL_PLATFORM_ANDROID_KHR:
+ 			// "null" ws passthrough everything, which essentially means
+ 			// the Android platform. Not to be confused with NULL (0) value.
+-			hybris_ws = "null";
++			// If a window system is loaded already, keep it: every ws can
++			// do offscreen (pbuffer) rendering, and switching would release
++			// the displays of the other users in the process (e.g. gl4es
++			// probing the hardware next to a Wayland window).
++			hybris_ws = ws_current_name() ? ws_current_name() : "null";
+ 			break;
+ 
+ #ifdef WANT_WAYLAND
+diff --git a/hybris/egl/platforms/wayland/eglplatform_wayland.cpp b/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
+index 873451e..5fd73fa 100644
+--- a/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
++++ b/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
+@@ -159,7 +159,9 @@ extern "C" void waylandws_Terminate(_EGLDisplay *dpy)
+ 		if (wdpy->init_count == 0) {
+ 			int ret = 0;
+ 			// We still have the sync callback on flight, wait for it to arrive
+-			while (ret == 0 && !wdpy->wlegl) {
++			// dispatch_queue returns the number of events: keep going until the
++			// android_wlegl global arrived (or an error)
++			while (ret >= 0 && !wdpy->wlegl) {
+ 				ret = wl_display_dispatch_queue(wdpy->wl_dpy, wdpy->queue);
+ 			}
+ 			assert(ret >= 0);
+@@ -191,7 +193,9 @@ extern "C" EGLNativeWindowType waylandws_CreateWindow(EGLNativeWindowType win, _
+ 	WaylandDisplay *wdpy = (WaylandDisplay *)display;
+ 
+ 	int ret = 0;
+-	while (ret == 0 && !wdpy->wlegl) {
++	// dispatch_queue returns the number of events: keep going until the
++	// android_wlegl global arrived (or an error)
++	while (ret >= 0 && !wdpy->wlegl) {
+ 		ret = wl_display_dispatch_queue(wdpy->wl_dpy, wdpy->queue);
+ 	}
+ 	assert(ret >= 0);
+diff --git a/hybris/egl/platforms/wayland/wayland_window.cpp b/hybris/egl/platforms/wayland/wayland_window.cpp
+index 90756e6..aea6fa5 100644
+--- a/hybris/egl/platforms/wayland/wayland_window.cpp
++++ b/hybris/egl/platforms/wayland/wayland_window.cpp
+@@ -65,8 +65,11 @@ static const struct wl_callback_listener frame_listener = {
+     wayland_frame_callback
+ };
+ 
++extern void hybris_wayland_arm_exit_guard();
++
+ int WaylandNativeWindow::dequeueBuffer(BaseNativeWindowBuffer **buffer, int *fenceFd){
+     HYBRIS_TRACE_BEGIN("wayland-platform", "dequeueBuffer", "");
++    hybris_wayland_arm_exit_guard();
+ 
+     WaylandNativeWindowBuffer *wnb=NULL;
+     TRACE("%p", buffer);
+diff --git a/hybris/egl/ws.c b/hybris/egl/ws.c
+index c1b61b3..cc7d756 100644
+--- a/hybris/egl/ws.c
++++ b/hybris/egl/ws.c
+@@ -33,6 +33,12 @@ static void* wsmod = NULL;
+ static char ws_name[32] = { 0 };
+ static int ws_init_count = 0;
+ 
++/* Name of the loaded ws, NULL if none is loaded yet. */
++const char *ws_current_name(void)
++{
++	return ws != NULL ? ws_name : NULL;
++}
++
+ static EGLBoolean ensureCorrectWs(const char * egl_platform)
+ {
+ 	return strcmp(egl_platform, ws_name) == 0;
+diff --git a/hybris/egl/ws.h b/hybris/egl/ws.h
+index 6bacc15..3681cb2 100644
+--- a/hybris/egl/ws.h
++++ b/hybris/egl/ws.h
+@@ -60,6 +60,7 @@ struct ws_module {
+ };
+ 
+ EGLBoolean ws_init(const char * egl_platform);
++const char *ws_current_name(void);
+ void ws_eglInitialized(struct _EGLDisplay *dpy);
+ 
+ struct _EGLDisplay *ws_GetDisplay(EGLNativeDisplayType native);
+diff --git a/hybris/gralloc/gralloc.c b/hybris/gralloc/gralloc.c
+index 973b247..c679e28 100644
+--- a/hybris/gralloc/gralloc.c
++++ b/hybris/gralloc/gralloc.c
+@@ -19,6 +19,7 @@
+ #include <android-config.h>
+ #endif
+ #include <stdlib.h>
++#include <unistd.h>
+ 
+ #include <hardware/hardware.h>
+ 
+@@ -41,6 +42,7 @@
+ #include <stdio.h>
+ #include <unistd.h>
+ #include <stdlib.h>
++#include <unistd.h>
+ #include <assert.h>
+ 
+ #include <dlfcn.h>
+@@ -110,8 +112,13 @@ void hybris_gralloc_initialize(int framebuffer)
+ {
+     if (version == -1) {
+ #if ANDROID_VERSION_MAJOR>=10
+-        hybris_ui_initialize();
+-        if (hybris_ui_check_for_symbol("graphic_buffer_allocator_allocate")) {
++        /* The libui compat layer allocates through the graphics allocator
++         * service and blocks forever waiting for hwservicemanager when no
++         * Android userspace is running; use the gralloc HAL directly then. */
++        if (!getenv("HYBRIS_GRALLOC_LEGACY") && access("/dev/__properties__/property_info", F_OK) == 0)
++            hybris_ui_initialize();
++        if (!getenv("HYBRIS_GRALLOC_LEGACY") && access("/dev/__properties__/property_info", F_OK) == 0 &&
++            hybris_ui_check_for_symbol("graphic_buffer_allocator_allocate")) {
+             version = 2;
+         } else
+ #endif
+diff --git a/hybris/platforms/wayland/wayland_window_common.cpp b/hybris/platforms/wayland/wayland_window_common.cpp
+index 91f7843..5a4287b 100644
+--- a/hybris/platforms/wayland/wayland_window_common.cpp
++++ b/hybris/platforms/wayland/wayland_window_common.cpp
+@@ -158,6 +158,29 @@ static void check_fatal_error(struct wl_display *display)
+     abort();
+ }
+ 
++/*
++ * Android drivers tear down the EGL surfaces still alive at exit from their
++ * own exit handlers, when the application's Wayland objects may be gone. Skip
++ * the Wayland and gralloc cleanup then: the process is going away anyway.
++ *
++ * glibc runs thread_local destructors before atexit handlers, newest first,
++ * so a guard armed once the driver has set up its own handlers (i.e. on the
++ * first dequeueBuffer) fires before the driver's teardown.
++ */
++static bool wayland_process_exiting = false;
++
++namespace {
++struct ExitGuard {
++    ~ExitGuard() { wayland_process_exiting = true; }
++};
++}
++
++void hybris_wayland_arm_exit_guard()
++{
++    static thread_local ExitGuard guard;
++    (void) &guard;
++}
++
+ WaylandNativeWindow::WaylandNativeWindow(struct wl_egl_window *window,
+                                          struct wl_display *display,
+                                          android_wlegl *wlegl)
+@@ -199,6 +222,9 @@ WaylandNativeWindow::WaylandNativeWindow(struct wl_egl_window *window,
+ 
+ WaylandNativeWindow::~WaylandNativeWindow()
+ {
++    if (wayland_process_exiting)
++        return;
++
+     destroyBuffers();
+     if (frame_callback)
+         wl_callback_destroy(frame_callback);
+@@ -641,6 +667,9 @@ ServerWaylandBuffer::ServerWaylandBuffer(unsigned int w,
+ 
+ ServerWaylandBuffer::~ServerWaylandBuffer()
+ {
++    if (wayland_process_exiting)
++        return;
++
+     if (m_buf)
+         wl_buffer_destroy(m_buf);
+ 

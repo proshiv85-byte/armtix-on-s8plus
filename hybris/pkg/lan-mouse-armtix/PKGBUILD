@@ -1,0 +1,36 @@
+# lan-mouse for ARMtix: control the phone with a PC's keyboard and mouse
+# (move the PC's cursor past a screen edge). Receiving side only: input
+# emulation through sway's virtual-pointer/keyboard protocols, no GUI.
+# The sway session starts `lan-mouse daemon` when ~/.config/lan-mouse/config.toml
+# exists (see hybris/README.md for the PC side).
+pkgname=lan-mouse-armtix
+pkgver=0.11.0
+pkgrel=1
+pkgdesc="Software KVM: use a PC's keyboard/mouse on the phone (sway receiver)"
+arch=(aarch64)
+url="https://github.com/feschber/lan-mouse"
+license=(GPL-3.0-only)
+depends=(glibc gcc-libs wayland libxkbcommon)
+makedepends=(git cargo)
+provides=(lan-mouse)
+conflicts=(lan-mouse)
+options=(!lto)
+source=("lan-mouse::git+https://github.com/feschber/lan-mouse.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+prepare() {
+	cd lan-mouse
+	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+	cd lan-mouse
+	cargo build --frozen --release --no-default-features --features wlroots_emulation
+}
+
+package() {
+	cd lan-mouse
+	install -Dm755 target/release/lan-mouse -t "$pkgdir/usr/bin/"
+	install -Dm644 config.toml "$pkgdir/usr/share/doc/$pkgname/config.toml.example"
+	install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

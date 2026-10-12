@@ -1,0 +1,19 @@
+halium-16.0-gsi-hybris-subset.tar.zst is a subset of the Halium 16 (LineageOS
+based, Android 16 / SDK 36) generic arm64 system image, built by the UBports CI:
+
+  https://ci.ubports.com/job/UBportsCommunityPortsJenkinsCI/job/ubports%252Fporting%252Fcommunity-ports%252Fjenkins-ci%252Fgeneric_arm64/job/halium-16.0/
+  artifact halium_halium_arm64.tar.xz, built 2026-10-09
+  sha256 145acedb46318a864254f84733734db7b11ae629b121cbc9a2c87d5e9d907a76
+  ro.build.fingerprint=halium/lineage_halium_arm64/halium_arm64:16/BP4A.251205.006/97:userdebug/test-keys
+
+Its bionic carries the Halium hybris-patches (branch halium-16.0,
+https://github.com/Halium/hybris-patches): TLS accesses go through
+__get_tls_hooks() so libhybris can run bionic code inside glibc processes.
+
+Contents: /apex/com.android.runtime/lib64/bionic/{libc,libm,libdl,libdl_android}.so
+(from com.android.runtime.apex), their /system/lib64 symlinks, /system/build.prop
+and the /system/lib64 libraries that the Galaxy S8+ Mali driver, gralloc and
+libhybris load (measured at runtime, plus their DT_NEEDED closure).
+
+AOSP and LineageOS are licensed under the Apache License 2.0; bionic is
+BSD-licensed.

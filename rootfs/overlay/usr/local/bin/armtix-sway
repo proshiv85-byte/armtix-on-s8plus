@@ -1,0 +1,35 @@
+#!/bin/sh
+# Start sway on the phone screen. Log: ~/.local/state/sway.log
+#
+# Display: wlroots' fbdev backend on /dev/fb0 (no KMS on the Exynos decon).
+# GPU: the Android Mali driver through libhybris (GLES2 renderer), falls back
+# to software rendering (WLR_RENDERER=pixman) if that fails to start.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+# libinput needs libudev device properties, and udevd doesn't work on 4.4:
+# use libudev-zero. sway has file capabilities (cap_sys_nice), so the dynamic
+# linker would ignore LD_LIBRARY_PATH; starting it through ld.so avoids that
+# (sway just runs without the capability). Apps started from sway inherit it.
+export LD_LIBRARY_PATH=/usr/lib/libudev-zero${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+SWAY="/usr/lib/ld-linux-aarch64.so.1 --argv0 sway /usr/bin/sway"
+export LIBSEAT_BACKEND=seatd
+export WLR_LIBINPUT_NO_DEVICES=1
+export XDG_SESSION_TYPE=wayland XDG_SESSION_DESKTOP=sway XDG_CURRENT_DESKTOP=sway
+export MOZ_ENABLE_WAYLAND=1 QT_QPA_PLATFORM="wayland;xcb" SDL_VIDEODRIVER=wayland
+export GDK_BACKEND=wayland,x11 _JAVA_AWT_WM_NONREPARENTING=1
+# Apps render with Mesa's llvmpipe (libhybris is GLVND's second choice, see
+# hybris-run); skip Mesa's Zink attempt, there's no Vulkan driver
+export GALLIUM_DRIVER=llvmpipe
+
+mkdir -p ~/.local/state
+log=~/.local/state/sway.log
+[ -f "$log" ] && mv -f "$log" "$log.old"
+start=$(date +%s)
+dbus-run-session $SWAY "$@" > "$log" 2>&1
+rc=$?
+if [ $rc -ne 0 ] && [ -z "$WLR_RENDERER" ] && [ $(( $(date +%s) - start )) -lt 15 ]; then
+	# The GPU path failed to start (e.g. /vendor libraries missing):
+	# software rendering still gives a working desktop
+	mv -f "$log" "$log.gpu-failed"
+	WLR_RENDERER=pixman exec dbus-run-session $SWAY "$@" > "$log" 2>&1
+fi
+exit $rc

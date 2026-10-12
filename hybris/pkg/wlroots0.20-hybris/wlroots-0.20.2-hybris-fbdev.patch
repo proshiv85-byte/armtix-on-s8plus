@@ -1,0 +1,1504 @@
+diff --git a/backend/backend.c b/backend/backend.c
+index 3d84aa6..fee9fef 100644
+--- a/backend/backend.c
++++ b/backend/backend.c
+@@ -4,6 +4,7 @@
+ #include <unistd.h>
+ #include <wayland-server-core.h>
+ 
++#include <wlr/backend/fbdev.h>
+ #include <wlr/backend/headless.h>
+ #include <wlr/backend/interface.h>
+ #include <wlr/backend/multi.h>
+@@ -232,6 +233,16 @@ static struct wlr_backend *attempt_headless_backend(struct wl_event_loop *loop)
+ 	return backend;
+ }
+ 
++static const char *fbdev_device_path(void) {
++	const char *path = getenv("WLR_FBDEV_DEVICE");
++	return path != NULL ? path : "/dev/fb0";
++}
++
++static struct wlr_backend *attempt_fbdev_backend(struct wl_event_loop *loop,
++		struct wlr_session *session) {
++	return wlr_fbdev_backend_create(loop, session, fbdev_device_path());
++}
++
+ static struct wlr_backend *attempt_drm_backend(struct wlr_backend *backend, struct wlr_session *session) {
+ #if WLR_HAS_DRM_BACKEND
+ 	struct wlr_device *gpus[8];
+@@ -297,6 +308,10 @@ static bool attempt_backend_by_name(struct wl_event_loop *loop,
+ 		backend = attempt_x11_backend(loop, NULL);
+ 	} else if (strcmp(name, "headless") == 0) {
+ 		backend = attempt_headless_backend(loop);
++	} else if (strcmp(name, "fbdev") == 0) {
++		// The session is optional (only used for VT switching), so use
++		// one if a previous backend created it
++		backend = attempt_fbdev_backend(loop, *session_ptr);
+ 	} else if (strcmp(name, "drm") == 0 || strcmp(name, "libinput") == 0) {
+ 		// DRM and libinput need a session
+ 		if (*session_ptr == NULL) {
+@@ -417,8 +432,15 @@ struct wlr_backend *wlr_backend_autocreate(struct wl_event_loop *loop,
+ 
+ 	struct wlr_backend *primary_drm = attempt_drm_backend(multi, session);
+ 	if (primary_drm == NULL) {
+-		wlr_log(WLR_ERROR, "Failed to open any DRM device");
+-		goto error;
++		// No KMS (e.g. Android devices with fbdev-only display drivers)
++		wlr_log(WLR_INFO, "No DRM device, trying fbdev %s", fbdev_device_path());
++		struct wlr_backend *fbdev = attempt_fbdev_backend(loop, session);
++		if (fbdev == NULL) {
++			wlr_log(WLR_ERROR, "Failed to open any DRM or fbdev device");
++			goto error;
++		}
++		wlr_multi_backend_add(multi, fbdev);
++		goto success;
+ 	}
+ 
+ 	if (!auto_backend_monitor_create(multi, primary_drm)) {
+diff --git a/backend/fbdev/backend.c b/backend/fbdev/backend.c
+new file mode 100644
+index 0000000..1262caf
+--- /dev/null
++++ b/backend/fbdev/backend.c
+@@ -0,0 +1,556 @@
++#include <assert.h>
++#include <drm_fourcc.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <inttypes.h>
++#include <linux/fb.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <time.h>
++#include <unistd.h>
++#include <wlr/backend/fbdev.h>
++#include <wlr/backend/interface.h>
++#include <wlr/backend/session.h>
++#include <wlr/interfaces/wlr_buffer.h>
++#include <wlr/interfaces/wlr_output.h>
++#include <wlr/render/drm_format_set.h>
++#include <wlr/util/log.h>
++#include "types/wlr_output.h"
++
++#define FBDEV_DEFAULT_REFRESH (60 * 1000) // 60 Hz
++
++static const uint32_t SUPPORTED_OUTPUT_STATE =
++	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
++	WLR_OUTPUT_STATE_BUFFER |
++	WLR_OUTPUT_STATE_ENABLED |
++	WLR_OUTPUT_STATE_MODE;
++
++struct wlr_fbdev_output;
++
++struct wlr_fbdev_backend {
++	struct wlr_backend backend;
++	struct wl_event_loop *event_loop;
++	struct wlr_session *session; // may be NULL
++	struct wlr_fbdev_output *output; // NULL once destroyed
++	bool started;
++
++	struct wl_listener event_loop_destroy;
++	struct wl_listener session_active;
++	struct wl_listener session_destroy;
++};
++
++struct wlr_fbdev_output {
++	struct wlr_output wlr_output;
++	struct wlr_fbdev_backend *backend;
++
++	int fd;
++	uint8_t *map; // whole framebuffer memory
++	size_t map_size;
++	uint8_t *visible; // start of the visible area in map
++	size_t line_length; // bytes
++	int width, height;
++	uint32_t format; // DRM format of the framebuffer
++	struct wlr_drm_format_set primary_formats;
++
++	struct wl_event_source *frame_timer;
++	int frame_delay; // ms
++	int64_t last_frame_ns; // CLOCK_MONOTONIC of the last frame event
++	// next frame must copy the whole buffer (first frame, after VT switch...)
++	bool full_damage;
++	// clean written cache lines (WLR_FBDEV_CLEAN_CACHE=0 disables)
++	bool clean_cache;
++};
++
++static const struct wlr_backend_impl backend_impl;
++static const struct wlr_output_impl output_impl;
++
++static struct wlr_fbdev_backend *fbdev_backend_from_backend(
++		struct wlr_backend *wlr_backend) {
++	assert(wlr_backend_is_fbdev(wlr_backend));
++	struct wlr_fbdev_backend *backend = wl_container_of(wlr_backend, backend, backend);
++	return backend;
++}
++
++static struct wlr_fbdev_output *fbdev_output_from_output(
++		struct wlr_output *wlr_output) {
++	assert(wlr_output_is_fbdev(wlr_output));
++	struct wlr_fbdev_output *output = wl_container_of(wlr_output, output, wlr_output);
++	return output;
++}
++
++static int64_t now_ns(void) {
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
++}
++
++static bool output_active(struct wlr_fbdev_output *output) {
++	struct wlr_session *session = output->backend->session;
++	return session == NULL || session->active;
++}
++
++static bool output_test(struct wlr_output *wlr_output,
++		const struct wlr_output_state *state) {
++	struct wlr_fbdev_output *output = fbdev_output_from_output(wlr_output);
++
++	uint32_t unsupported = state->committed & ~SUPPORTED_OUTPUT_STATE;
++	if (unsupported != 0) {
++		wlr_log(WLR_DEBUG, "Unsupported output state fields: 0x%"PRIx32,
++			unsupported);
++		return false;
++	}
++
++	if (state->committed & WLR_OUTPUT_STATE_MODE) {
++		int width, height;
++		if (state->mode_type == WLR_OUTPUT_STATE_MODE_FIXED) {
++			width = state->mode->width;
++			height = state->mode->height;
++		} else {
++			width = state->custom_mode.width;
++			height = state->custom_mode.height;
++		}
++		if (width != output->width || height != output->height) {
++			wlr_log(WLR_DEBUG, "fbdev mode is fixed at %dx%d",
++				output->width, output->height);
++			return false;
++		}
++	}
++
++	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
++		struct wlr_buffer *buffer = state->buffer;
++		// The framebuffer is filled with the CPU (e.g. no direct scan-out
++		// of GPU client buffers)
++		if (buffer->impl->begin_data_ptr_access == NULL) {
++			wlr_log(WLR_DEBUG, "Buffer can't be read by the CPU");
++			return false;
++		}
++		if (buffer->width != output->width || buffer->height != output->height) {
++			wlr_log(WLR_DEBUG, "Buffer size %dx%d doesn't match fbdev size %dx%d",
++				buffer->width, buffer->height, output->width, output->height);
++			return false;
++		}
++	}
++
++	return true;
++}
++
++/*
++ * Some fbdev drivers (e.g. the Exynos decon) map the framebuffer CPU-cached
++ * while the display engine reads memory directly: written lines must be
++ * cleaned to the point of coherency, or stale cache lines show up on screen.
++ * Linux lets user space do this on arm64 (SCTLR_EL1.UCI).
++ */
++#if defined(__aarch64__)
++static void clean_dcache_range(const uint8_t *start, size_t len) {
++	static size_t line = 0;
++	if (line == 0) {
++		uint64_t ctr;
++		__asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
++		line = (size_t)4 << ((ctr >> 16) & 0xf);
++	}
++	uintptr_t p = (uintptr_t)start & ~(uintptr_t)(line - 1);
++	uintptr_t end = (uintptr_t)start + len;
++	for (; p < end; p += line) {
++		__asm__ volatile("dc cvac, %0" : : "r"(p) : "memory");
++	}
++}
++
++static void dcache_barrier(void) {
++	__asm__ volatile("dsb sy" : : : "memory");
++}
++#else
++static void clean_dcache_range(const uint8_t *start, size_t len) {}
++static void dcache_barrier(void) {}
++#endif
++
++static void copy_rect(struct wlr_fbdev_output *output, const uint8_t *src,
++		size_t src_stride, uint32_t src_format, const pixman_box32_t *box,
++		bool clean_cache) {
++	size_t x_off = (size_t)box->x1 * 4;
++	size_t len = (size_t)(box->x2 - box->x1) * 4;
++	// XRGB8888 <-> XBGR8888 differ in the red/blue byte order only
++	bool swap_rb = (src_format == DRM_FORMAT_ABGR8888 ||
++		src_format == DRM_FORMAT_XBGR8888) !=
++		(output->format == DRM_FORMAT_XBGR8888);
++
++	for (int y = box->y1; y < box->y2; y++) {
++		const uint8_t *s = src + (size_t)y * src_stride + x_off;
++		uint8_t *d = output->visible + (size_t)y * output->line_length + x_off;
++		if (!swap_rb) {
++			memcpy(d, s, len);
++		} else {
++			const uint32_t *s32 = (const uint32_t *)s;
++			uint32_t *d32 = (uint32_t *)d;
++			for (size_t x = 0; x < len / 4; x++) {
++				uint32_t p = s32[x];
++				d32[x] = (p & 0xFF00FF00) | ((p >> 16) & 0xFF) | ((p & 0xFF) << 16);
++			}
++		}
++		if (clean_cache) {
++			clean_dcache_range(d, len);
++		}
++	}
++}
++
++static bool output_present_buffer(struct wlr_fbdev_output *output,
++		const struct wlr_output_state *state) {
++	struct wlr_buffer *buffer = state->buffer;
++
++	void *data;
++	uint32_t format;
++	size_t stride;
++	if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ,
++			&data, &format, &stride)) {
++		wlr_log(WLR_ERROR, "Failed to access buffer data");
++		return false;
++	}
++	if (format != DRM_FORMAT_XRGB8888 && format != DRM_FORMAT_ARGB8888 &&
++			format != DRM_FORMAT_XBGR8888 && format != DRM_FORMAT_ABGR8888) {
++		wlr_buffer_end_data_ptr_access(buffer);
++		wlr_log(WLR_ERROR, "Unsupported buffer format 0x%"PRIX32, format);
++		return false;
++	}
++
++	pixman_region32_t damage;
++	pixman_region32_init_rect(&damage, 0, 0, output->width, output->height);
++	if (!output->full_damage && (state->committed & WLR_OUTPUT_STATE_DAMAGE)) {
++		pixman_region32_intersect(&damage, &damage, &state->damage);
++	}
++	output->full_damage = false;
++
++	int rects_len = 0;
++	const pixman_box32_t *rects = pixman_region32_rectangles(&damage, &rects_len);
++	for (int i = 0; i < rects_len; i++) {
++		copy_rect(output, data, stride, format, &rects[i], output->clean_cache);
++	}
++	if (output->clean_cache) {
++		dcache_barrier();
++	}
++	pixman_region32_fini(&damage);
++
++	wlr_buffer_end_data_ptr_access(buffer);
++	return true;
++}
++
++static void output_set_blank(struct wlr_fbdev_output *output, bool blank) {
++	if (ioctl(output->fd, FBIOBLANK, blank ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK) != 0) {
++		wlr_log_errno(WLR_DEBUG, "FBIOBLANK failed");
++	}
++}
++
++static bool output_commit(struct wlr_output *wlr_output,
++		const struct wlr_output_state *state) {
++	struct wlr_fbdev_output *output = fbdev_output_from_output(wlr_output);
++
++	if (!output_test(wlr_output, state)) {
++		return false;
++	}
++
++	if (state->committed & WLR_OUTPUT_STATE_ENABLED) {
++		output_set_blank(output, !state->enabled);
++		output->full_damage = true;
++	const char *clean = getenv("WLR_FBDEV_CLEAN_CACHE");
++	output->clean_cache = clean == NULL || strcmp(clean, "0") != 0;
++	}
++
++	if ((state->committed & WLR_OUTPUT_STATE_BUFFER) && output_active(output)) {
++		if (!output_present_buffer(output, state)) {
++			return false;
++		}
++	}
++
++	if (output_pending_enabled(wlr_output, state)) {
++		struct wlr_output_event_present present_event = {
++			.commit_seq = wlr_output->commit_seq + 1,
++			.presented = true,
++		};
++		output_defer_present(wlr_output, present_event);
++
++		// Frames on a fixed clock: the next one is due one refresh period
++		// after the previous frame event, not after this (slow) commit
++		int64_t now = now_ns();
++		int64_t due = output->last_frame_ns + (int64_t)output->frame_delay * 1000000;
++		int delay_ms = due > now ? (int)((due - now + 999999) / 1000000) : 1;
++		wl_event_source_timer_update(output->frame_timer, delay_ms);
++	}
++
++	return true;
++}
++
++static const struct wlr_drm_format_set *output_get_primary_formats(
++		struct wlr_output *wlr_output, uint32_t buffer_caps) {
++	struct wlr_fbdev_output *output = fbdev_output_from_output(wlr_output);
++	return &output->primary_formats;
++}
++
++static void output_destroy(struct wlr_output *wlr_output) {
++	struct wlr_fbdev_output *output = fbdev_output_from_output(wlr_output);
++
++	wlr_output_finish(wlr_output);
++
++	output->backend->output = NULL;
++	wl_event_source_remove(output->frame_timer);
++	wlr_drm_format_set_finish(&output->primary_formats);
++	munmap(output->map, output->map_size);
++	close(output->fd);
++	free(output);
++}
++
++static const struct wlr_output_impl output_impl = {
++	.destroy = output_destroy,
++	.test = output_test,
++	.commit = output_commit,
++	.get_primary_formats = output_get_primary_formats,
++	// no hardware cursor: wlroots draws a software cursor
++};
++
++bool wlr_output_is_fbdev(struct wlr_output *wlr_output) {
++	return wlr_output->impl == &output_impl;
++}
++
++static int signal_frame(void *data) {
++	struct wlr_fbdev_output *output = data;
++	output->last_frame_ns = now_ns();
++	wlr_output_send_frame(&output->wlr_output);
++	return 0;
++}
++
++static uint32_t format_from_var(const struct fb_var_screeninfo *var) {
++	if (var->bits_per_pixel != 32 || var->red.length != 8 ||
++			var->green.length != 8 || var->blue.length != 8 ||
++			var->green.offset != 8) {
++		return DRM_FORMAT_INVALID;
++	}
++	if (var->red.offset == 16 && var->blue.offset == 0) {
++		return DRM_FORMAT_XRGB8888;
++	}
++	if (var->red.offset == 0 && var->blue.offset == 16) {
++		return DRM_FORMAT_XBGR8888;
++	}
++	return DRM_FORMAT_INVALID;
++}
++
++static int32_t refresh_from_var(const struct fb_var_screeninfo *var) {
++	if (var->pixclock == 0) {
++		return FBDEV_DEFAULT_REFRESH;
++	}
++	uint64_t htotal = (uint64_t)var->xres + var->left_margin +
++		var->right_margin + var->hsync_len;
++	uint64_t vtotal = (uint64_t)var->yres + var->upper_margin +
++		var->lower_margin + var->vsync_len;
++	// pixclock is in picoseconds
++	uint64_t mhz = 1000000000000000ULL / var->pixclock / (htotal * vtotal);
++	if (mhz < 10000 || mhz > 250000) {
++		return FBDEV_DEFAULT_REFRESH;
++	}
++	return (int32_t)mhz;
++}
++
++static struct wlr_fbdev_output *output_create(struct wlr_fbdev_backend *backend,
++		const char *path) {
++	int fd = open(path, O_RDWR | O_CLOEXEC);
++	if (fd < 0) {
++		wlr_log_errno(WLR_ERROR, "Failed to open %s", path);
++		return NULL;
++	}
++
++	struct fb_var_screeninfo var;
++	struct fb_fix_screeninfo fix;
++	if (ioctl(fd, FBIOGET_VSCREENINFO, &var) != 0 ||
++			ioctl(fd, FBIOGET_FSCREENINFO, &fix) != 0) {
++		wlr_log_errno(WLR_ERROR, "Failed to query %s", path);
++		goto error_fd;
++	}
++
++	uint32_t format = format_from_var(&var);
++	if (format == DRM_FORMAT_INVALID) {
++		wlr_log(WLR_ERROR, "Unsupported framebuffer format: %"PRIu32" bpp, "
++			"red %"PRIu32"/%"PRIu32" green %"PRIu32"/%"PRIu32" blue %"PRIu32"/%"PRIu32,
++			var.bits_per_pixel, var.red.offset, var.red.length,
++			var.green.offset, var.green.length, var.blue.offset, var.blue.length);
++		goto error_fd;
++	}
++
++	size_t visible_offset = (size_t)var.yoffset * fix.line_length + (size_t)var.xoffset * 4;
++	if (visible_offset + (size_t)var.yres * fix.line_length > fix.smem_len) {
++		wlr_log(WLR_ERROR, "Framebuffer memory too small");
++		goto error_fd;
++	}
++
++	uint8_t *map = mmap(NULL, fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++	if (map == MAP_FAILED) {
++		wlr_log_errno(WLR_ERROR, "Failed to mmap %s", path);
++		goto error_fd;
++	}
++
++	struct wlr_fbdev_output *output = calloc(1, sizeof(*output));
++	if (output == NULL) {
++		wlr_log_errno(WLR_ERROR, "Allocation failed");
++		munmap(map, fix.smem_len);
++		goto error_fd;
++	}
++	output->backend = backend;
++	output->fd = fd;
++	output->map = map;
++	output->map_size = fix.smem_len;
++	output->visible = map + visible_offset;
++	output->line_length = fix.line_length;
++	output->width = var.xres;
++	output->height = var.yres;
++	output->format = format;
++	output->full_damage = true;
++
++	// Let the renderer pick either byte order, but prefer the native one
++	wlr_drm_format_set_add(&output->primary_formats, format, DRM_FORMAT_MOD_LINEAR);
++	wlr_drm_format_set_add(&output->primary_formats, format, DRM_FORMAT_MOD_INVALID);
++	uint32_t alpha_format = format == DRM_FORMAT_XRGB8888 ?
++		DRM_FORMAT_ARGB8888 : DRM_FORMAT_ABGR8888;
++	wlr_drm_format_set_add(&output->primary_formats, alpha_format, DRM_FORMAT_MOD_LINEAR);
++	wlr_drm_format_set_add(&output->primary_formats, alpha_format, DRM_FORMAT_MOD_INVALID);
++
++	int32_t refresh = refresh_from_var(&var);
++	output->frame_delay = 1000000 / refresh;
++
++	struct wlr_output *wlr_output = &output->wlr_output;
++	struct wlr_output_state state;
++	wlr_output_state_init(&state);
++	wlr_output_state_set_custom_mode(&state, output->width, output->height, refresh);
++	wlr_output_init(wlr_output, &backend->backend, &output_impl,
++		backend->event_loop, &state);
++	wlr_output_state_finish(&state);
++
++	// Unknown sizes are reported as 0 or -1 (UINT32_MAX)
++	if (var.width > 0 && var.width < 10000 && var.height > 0 && var.height < 10000) {
++		wlr_output->phys_width = var.width;
++		wlr_output->phys_height = var.height;
++	}
++
++	const char *name = strrchr(path, '/');
++	name = name ? name + 1 : path;
++	char output_name[64];
++	snprintf(output_name, sizeof(output_name), "FBDEV-%s", name);
++	wlr_output_set_name(wlr_output, output_name);
++
++	char description[128];
++	snprintf(description, sizeof(description), "Framebuffer %s (%.16s)", path, fix.id);
++	wlr_output_set_description(wlr_output, description);
++
++	output->frame_timer = wl_event_loop_add_timer(backend->event_loop,
++		signal_frame, output);
++
++	wlr_log(WLR_INFO, "fbdev output %s: %dx%d @ %.3f Hz, %s, stride %zu",
++		path, output->width, output->height, refresh / 1000.0,
++		format == DRM_FORMAT_XRGB8888 ? "XRGB8888" : "XBGR8888",
++		output->line_length);
++	return output;
++
++error_fd:
++	close(fd);
++	return NULL;
++}
++
++static bool backend_start(struct wlr_backend *wlr_backend) {
++	struct wlr_fbdev_backend *backend = fbdev_backend_from_backend(wlr_backend);
++	wlr_log(WLR_INFO, "Starting fbdev backend");
++
++	if (backend->output != NULL) {
++		wl_signal_emit_mutable(&backend->backend.events.new_output,
++			&backend->output->wlr_output);
++	}
++
++	backend->started = true;
++	return true;
++}
++
++static void backend_destroy(struct wlr_backend *wlr_backend) {
++	if (!wlr_backend) {
++		return;
++	}
++	struct wlr_fbdev_backend *backend = fbdev_backend_from_backend(wlr_backend);
++
++	wlr_backend_finish(wlr_backend);
++
++	if (backend->output != NULL) {
++		wlr_output_destroy(&backend->output->wlr_output);
++	}
++
++	wl_list_remove(&backend->event_loop_destroy.link);
++	if (backend->session != NULL) {
++		wl_list_remove(&backend->session_active.link);
++		wl_list_remove(&backend->session_destroy.link);
++	}
++	free(backend);
++}
++
++static const struct wlr_backend_impl backend_impl = {
++	.start = backend_start,
++	.destroy = backend_destroy,
++};
++
++bool wlr_backend_is_fbdev(struct wlr_backend *backend) {
++	return backend->impl == &backend_impl;
++}
++
++static void handle_event_loop_destroy(struct wl_listener *listener, void *data) {
++	struct wlr_fbdev_backend *backend =
++		wl_container_of(listener, backend, event_loop_destroy);
++	backend_destroy(&backend->backend);
++}
++
++static void handle_session_active(struct wl_listener *listener, void *data) {
++	struct wlr_fbdev_backend *backend =
++		wl_container_of(listener, backend, session_active);
++	if (backend->output == NULL || !backend->session->active) {
++		return;
++	}
++	// Whatever was on the VT we come back from is in the framebuffer now
++	backend->output->full_damage = true;
++	wlr_output_update_needs_frame(&backend->output->wlr_output);
++}
++
++static void handle_session_destroy(struct wl_listener *listener, void *data) {
++	struct wlr_fbdev_backend *backend =
++		wl_container_of(listener, backend, session_destroy);
++	wl_list_remove(&backend->session_active.link);
++	wl_list_remove(&backend->session_destroy.link);
++	backend->session = NULL;
++}
++
++struct wlr_backend *wlr_fbdev_backend_create(struct wl_event_loop *loop,
++		struct wlr_session *session, const char *path) {
++	wlr_log(WLR_INFO, "Creating fbdev backend for %s", path);
++
++	struct wlr_fbdev_backend *backend = calloc(1, sizeof(*backend));
++	if (!backend) {
++		wlr_log(WLR_ERROR, "Failed to allocate wlr_fbdev_backend");
++		return NULL;
++	}
++
++	wlr_backend_init(&backend->backend, &backend_impl);
++	// The output reads rendered buffers with the CPU
++	backend->backend.buffer_caps = WLR_BUFFER_CAP_DATA_PTR | WLR_BUFFER_CAP_SHM;
++	backend->event_loop = loop;
++	backend->session = session;
++
++	backend->output = output_create(backend, path);
++	if (backend->output == NULL) {
++		wlr_backend_finish(&backend->backend);
++		free(backend);
++		return NULL;
++	}
++
++	backend->event_loop_destroy.notify = handle_event_loop_destroy;
++	wl_event_loop_add_destroy_listener(loop, &backend->event_loop_destroy);
++
++	if (session != NULL) {
++		backend->session_active.notify = handle_session_active;
++		wl_signal_add(&session->events.active, &backend->session_active);
++		backend->session_destroy.notify = handle_session_destroy;
++		wl_signal_add(&session->events.destroy, &backend->session_destroy);
++	}
++
++	return &backend->backend;
++}
+diff --git a/backend/fbdev/meson.build b/backend/fbdev/meson.build
+new file mode 100644
+index 0000000..be4abfb
+--- /dev/null
++++ b/backend/fbdev/meson.build
+@@ -0,0 +1 @@
++wlr_files += files('backend.c')
+diff --git a/backend/meson.build b/backend/meson.build
+index ed977d3..a611b18 100644
+--- a/backend/meson.build
++++ b/backend/meson.build
+@@ -27,3 +27,4 @@ endforeach
+ subdir('multi')
+ subdir('wayland')
+ subdir('headless')
++subdir('fbdev')
+diff --git a/include/render/egl.h b/include/render/egl.h
+index 103ab57..b23c11c 100644
+--- a/include/render/egl.h
++++ b/include/render/egl.h
+@@ -2,6 +2,7 @@
+ #define RENDER_EGL_H
+ 
+ #include <wlr/render/egl.h>
++#include "render/hybris.h"
+ 
+ struct wlr_egl {
+ 	EGLDisplay display;
+@@ -44,6 +45,10 @@ struct wlr_egl {
+ 		PFNEGLWAITSYNCKHRPROC eglWaitSyncKHR;
+ 	} procs;
+ 
++	// libhybris (Android EGL driver): no DRM device, render via gralloc
++	bool is_hybris;
++	struct wlr_hybris_procs hybris;
++
+ 	bool has_modifiers;
+ 	struct wlr_drm_format_set dmabuf_texture_formats;
+ 	struct wlr_drm_format_set dmabuf_render_formats;
+@@ -76,6 +81,14 @@ void wlr_egl_destroy(struct wlr_egl *egl);
+ EGLImageKHR wlr_egl_create_image_from_dmabuf(struct wlr_egl *egl,
+ 	struct wlr_dmabuf_attributes *attributes, bool *external_only);
+ 
++/**
++ * Creates an EGL image from a libhybris buffer: target is
++ * EGL_NATIVE_BUFFER_ANDROID (gralloc buffer) or EGL_WAYLAND_BUFFER_WL
++ * (wayland-android client buffer).
++ */
++EGLImageKHR wlr_egl_create_image_from_hybris(struct wlr_egl *egl,
++	EGLenum target, EGLClientBuffer buffer);
++
+ /**
+  * Get DMA-BUF formats suitable for sampling usage.
+  */
+diff --git a/include/render/gles2.h b/include/render/gles2.h
+index 6b852dc..6ce8eb4 100644
+--- a/include/render/gles2.h
++++ b/include/render/gles2.h
+@@ -44,6 +44,8 @@ struct wlr_gles2_renderer {
+ 	int drm_fd;
+ 
+ 	struct wlr_drm_format_set shm_texture_formats;
++	// libhybris: formats of the gralloc render buffers
++	struct wlr_drm_format_set hybris_render_formats;
+ 
+ 	const char *exts_str;
+ 	struct {
+diff --git a/include/render/hybris.h b/include/render/hybris.h
+new file mode 100644
+index 0000000..62ddcde
+--- /dev/null
++++ b/include/render/hybris.h
+@@ -0,0 +1,70 @@
++#ifndef RENDER_HYBRIS_H
++#define RENDER_HYBRIS_H
++
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <stdbool.h>
++#include <wayland-server-core.h>
++#include <wlr/render/allocator.h>
++#include <wlr/types/wlr_buffer.h>
++
++/*
++ * libhybris support: Android EGL drivers (e.g. the Mali blob) loaded into a
++ * glibc process. There is no DRM device, GBM or DMA-BUF import; render
++ * targets are gralloc buffers wrapped as EGLImages (EGL_NATIVE_BUFFER_ANDROID)
++ * and GPU clients share gralloc buffers through libhybris' wayland-android
++ * protocol (EGL_WL_bind_wayland_display).
++ */
++
++#ifndef EGL_PLATFORM_ANDROID_KHR
++#define EGL_PLATFORM_ANDROID_KHR 0x3141
++#endif
++#ifndef EGL_NATIVE_BUFFER_ANDROID
++#define EGL_NATIVE_BUFFER_ANDROID 0x3140
++#endif
++#ifndef EGL_WAYLAND_BUFFER_WL
++#define EGL_WAYLAND_BUFFER_WL 0x31D5
++#endif
++
++struct wlr_egl;
++struct wlr_renderer;
++
++struct wlr_hybris_procs {
++	EGLBoolean (*create_native_buffer)(EGLint width, EGLint height, EGLint usage,
++		EGLint format, EGLint *stride, EGLClientBuffer *buffer);
++	EGLBoolean (*lock_native_buffer)(EGLClientBuffer buffer, EGLint usage,
++		EGLint l, EGLint t, EGLint w, EGLint h, void **vaddr);
++	EGLBoolean (*unlock_native_buffer)(EGLClientBuffer buffer);
++	EGLBoolean (*release_native_buffer)(EGLClientBuffer buffer);
++	EGLBoolean (*bind_wayland_display)(EGLDisplay dpy, struct wl_display *display);
++	EGLBoolean (*unbind_wayland_display)(EGLDisplay dpy, struct wl_display *display);
++	EGLBoolean (*query_wayland_buffer)(EGLDisplay dpy, struct wl_resource *buffer,
++		EGLint attribute, EGLint *value);
++};
++
++/**
++ * Creates an EGL display/context on libhybris' Android platform. Returns NULL
++ * if libhybris is not the EGL implementation.
++ */
++struct wlr_egl *wlr_egl_create_hybris(void);
++
++/** GLES2 renderer on libhybris EGL, NULL if libhybris is not available. */
++struct wlr_renderer *wlr_gles2_renderer_create_hybris(void);
++
++/** gralloc-backed buffers that the GLES2 renderer can render into. */
++struct wlr_allocator *hybris_allocator_create(struct wlr_egl *egl);
++bool wlr_buffer_is_hybris(struct wlr_buffer *buffer);
++EGLClientBuffer hybris_buffer_get_native(struct wlr_buffer *buffer);
++
++/** Client buffers created through libhybris' wayland-android protocol. */
++bool wlr_buffer_is_hybris_wlegl(struct wlr_buffer *buffer);
++struct wl_resource *hybris_wlegl_buffer_get_resource(struct wlr_buffer *buffer);
++bool hybris_wlegl_buffer_has_alpha(struct wlr_buffer *buffer);
++
++/**
++ * Advertises libhybris' wayland-android global on the display and lets
++ * wlr_buffer_try_from_resource() handle its buffers.
++ */
++bool hybris_init_wl_display(struct wlr_egl *egl, struct wl_display *display);
++
++#endif
+diff --git a/include/wlr/backend/fbdev.h b/include/wlr/backend/fbdev.h
+new file mode 100644
+index 0000000..a55f3dc
+--- /dev/null
++++ b/include/wlr/backend/fbdev.h
+@@ -0,0 +1,31 @@
++/*
++ * This an unstable interface of wlroots. No guarantees are made regarding the
++ * future consistency of this API.
++ */
++#ifndef WLR_USE_UNSTABLE
++#error "Add -DWLR_USE_UNSTABLE to enable unstable wlroots features"
++#endif
++
++#ifndef WLR_BACKEND_FBDEV_H
++#define WLR_BACKEND_FBDEV_H
++
++#include <wlr/backend.h>
++#include <wlr/types/wlr_output.h>
++
++struct wlr_session;
++
++/**
++ * Creates a Linux framebuffer (fbdev) backend with one output for the given
++ * device (e.g. "/dev/fb0"). Frames are copied (damaged regions only) from the
++ * rendered buffers into the framebuffer.
++ *
++ * The session is optional: with one, nothing is drawn while the session is
++ * inactive (VT switched away).
++ */
++struct wlr_backend *wlr_fbdev_backend_create(struct wl_event_loop *loop,
++	struct wlr_session *session, const char *path);
++
++bool wlr_backend_is_fbdev(struct wlr_backend *backend);
++bool wlr_output_is_fbdev(struct wlr_output *output);
++
++#endif
+diff --git a/render/allocator/allocator.c b/render/allocator/allocator.c
+index b7dbf3d..6b542ba 100644
+--- a/render/allocator/allocator.c
++++ b/render/allocator/allocator.c
+@@ -19,6 +19,12 @@
+ 
+ #if WLR_HAS_UDMABUF_ALLOCATOR
+ #include "render/allocator/udmabuf.h"
++
++#if WLR_HAS_GLES2_RENDERER
++#include <wlr/render/gles2.h>
++#include "render/egl.h"
++#include "render/hybris.h"
++#endif
+ #endif
+ 
+ void wlr_allocator_init(struct wlr_allocator *alloc,
+@@ -108,6 +114,20 @@ struct wlr_allocator *wlr_allocator_autocreate(struct wlr_backend *backend,
+ 
+ 	struct wlr_allocator *alloc = NULL;
+ 
++#if WLR_HAS_GLES2_RENDERER
++	// libhybris can only render into gralloc buffers
++	if (wlr_renderer_is_gles2(renderer)) {
++		struct wlr_egl *egl = wlr_gles2_renderer_get_egl(renderer);
++		if (egl->is_hybris) {
++			if (!(backend_caps & WLR_BUFFER_CAP_DATA_PTR)) {
++				wlr_log(WLR_ERROR, "Backend can't scan out libhybris buffers");
++				return NULL;
++			}
++			return hybris_allocator_create(egl);
++		}
++	}
++#endif
++
+ 	uint32_t gbm_caps = WLR_BUFFER_CAP_DMABUF;
+ 	if ((backend_caps & gbm_caps) && (renderer_caps & gbm_caps)
+ 			&& drm_fd >= 0) {
+diff --git a/render/egl.c b/render/egl.c
+index 8673aca..97826d1 100644
+--- a/render/egl.c
++++ b/render/egl.c
+@@ -381,6 +381,8 @@ static bool egl_init_display(struct wlr_egl *egl, EGLDisplay display,
+ 	return true;
+ }
+ 
++static bool egl_init_context(struct wlr_egl *egl);
++
+ static bool egl_init(struct wlr_egl *egl, EGLenum platform,
+ 		void *remote_display, bool allow_software) {
+ 	EGLint display_attribs[3] = {0};
+@@ -408,6 +410,10 @@ static bool egl_init(struct wlr_egl *egl, EGLenum platform,
+ 		return false;
+ 	}
+ 
++	return egl_init_context(egl);
++}
++
++static bool egl_init_context(struct wlr_egl *egl) {
+ 	size_t atti = 0;
+ 	EGLint attribs[7];
+ 	attribs[atti++] = EGL_CONTEXT_CLIENT_VERSION;
+@@ -614,6 +620,82 @@ error:
+ 	return NULL;
+ }
+ 
++struct wlr_egl *wlr_egl_create_hybris(void) {
++	struct wlr_egl *egl = egl_create();
++	if (egl == NULL) {
++		return NULL;
++	}
++
++	// The Android platform is only provided by libhybris (its "null" window
++	// system: the compositor only renders into gralloc buffers)
++	EGLDisplay display = egl->procs.eglGetPlatformDisplayEXT(
++		EGL_PLATFORM_ANDROID_KHR, EGL_DEFAULT_DISPLAY, NULL);
++	if (display == EGL_NO_DISPLAY) {
++		wlr_log(WLR_DEBUG, "No libhybris EGL (EGL_PLATFORM_ANDROID_KHR unsupported)");
++		goto error;
++	}
++	// GLVND advertises EGL_EXT_device_query itself, but Android EGL has no
++	// EGLDevice
++	egl->exts.EXT_device_query = false;
++	if (!egl_init_display(egl, display, true) || !egl_init_context(egl)) {
++		goto error;
++	}
++	if (!egl->exts.KHR_image_base) {
++		wlr_log(WLR_ERROR, "EGL_KHR_image_base not supported");
++		goto error;
++	}
++
++	// With GLVND these dispatch to the vendor of the current context, so
++	// callers must make the context current
++	struct {
++		void *proc_ptr;
++		const char *name;
++	} procs[] = {
++		{ &egl->hybris.create_native_buffer, "eglHybrisCreateNativeBuffer" },
++		{ &egl->hybris.lock_native_buffer, "eglHybrisLockNativeBuffer" },
++		{ &egl->hybris.unlock_native_buffer, "eglHybrisUnlockNativeBuffer" },
++		{ &egl->hybris.release_native_buffer, "eglHybrisReleaseNativeBuffer" },
++		{ &egl->hybris.bind_wayland_display, "eglBindWaylandDisplayWL" },
++		{ &egl->hybris.unbind_wayland_display, "eglUnbindWaylandDisplayWL" },
++		{ &egl->hybris.query_wayland_buffer, "eglQueryWaylandBufferWL" },
++	};
++	for (size_t i = 0; i < sizeof(procs) / sizeof(procs[0]); i++) {
++		void *proc = (void *)eglGetProcAddress(procs[i].name);
++		if (proc == NULL) {
++			wlr_log(WLR_ERROR, "eglGetProcAddress(%s) failed", procs[i].name);
++			goto error_context;
++		}
++		*(void **)procs[i].proc_ptr = proc;
++	}
++	egl->is_hybris = true;
++
++	wlr_log(WLR_INFO, "Using libhybris EGL");
++	return egl;
++
++error_context:
++	eglDestroyContext(egl->display, egl->context);
++error:
++	wlr_log(WLR_DEBUG, "Failed to initialize libhybris EGL");
++	free(egl);
++	eglReleaseThread();
++	return NULL;
++}
++
++EGLImageKHR wlr_egl_create_image_from_hybris(struct wlr_egl *egl,
++		EGLenum target, EGLClientBuffer buffer) {
++	static const EGLint attribs[] = {
++		// Our clients don't expect our usage to trash the buffer contents
++		EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
++		EGL_NONE,
++	};
++	EGLImageKHR image = egl->procs.eglCreateImageKHR(egl->display,
++		EGL_NO_CONTEXT, target, buffer, attribs);
++	if (image == EGL_NO_IMAGE_KHR) {
++		wlr_log(WLR_ERROR, "eglCreateImageKHR failed for libhybris buffer");
++	}
++	return image;
++}
++
+ struct wlr_egl *wlr_egl_create_with_context(EGLDisplay display,
+ 		EGLContext context) {
+ 	EGLint client_type;
+diff --git a/render/gles2/hybris.c b/render/gles2/hybris.c
+new file mode 100644
+index 0000000..251635b
+--- /dev/null
++++ b/render/gles2/hybris.c
+@@ -0,0 +1,318 @@
++#include <assert.h>
++#include <GLES2/gl2.h>
++#include <drm_fourcc.h>
++#include <stdlib.h>
++#include <wayland-server-protocol.h>
++#include <wlr/interfaces/wlr_buffer.h>
++#include <wlr/render/allocator.h>
++#include <wlr/render/drm_format_set.h>
++#include <wlr/util/log.h>
++#include "render/egl.h"
++#include "render/drm_format_set.h"
++#include "render/hybris.h"
++
++// Android HAL pixel formats and gralloc usage bits (system/graphics.h,
++// hardware/gralloc.h)
++#define HAL_PIXEL_FORMAT_RGBA_8888 1
++#define HAL_PIXEL_FORMAT_RGBX_8888 2
++#define HAL_PIXEL_FORMAT_BGRA_8888 5
++#define GRALLOC_USAGE_SW_READ_OFTEN 0x00000003
++#define GRALLOC_USAGE_SW_WRITE_OFTEN 0x00000030
++#define GRALLOC_USAGE_HW_TEXTURE 0x00000100
++#define GRALLOC_USAGE_HW_RENDER 0x00000200
++
++struct wlr_hybris_buffer {
++	struct wlr_buffer base;
++	struct wlr_egl *egl;
++	EGLClientBuffer native;
++	uint32_t drm_format;
++	size_t stride; // bytes
++};
++
++struct wlr_hybris_allocator {
++	struct wlr_allocator base;
++	struct wlr_egl *egl;
++};
++
++static const struct wlr_buffer_impl hybris_buffer_impl;
++
++// With GLVND, eglHybris* calls go to the vendor of the current context
++#define WITH_HYBRIS_CONTEXT(egl, ...) do { \
++		struct wlr_egl_context prev_ctx; \
++		wlr_egl_make_current(egl, &prev_ctx); \
++		__VA_ARGS__; \
++		wlr_egl_restore_context(&prev_ctx); \
++	} while (0)
++
++static struct wlr_hybris_buffer *hybris_buffer_from_buffer(
++		struct wlr_buffer *wlr_buffer) {
++	assert(wlr_buffer->impl == &hybris_buffer_impl);
++	struct wlr_hybris_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
++	return buffer;
++}
++
++bool wlr_buffer_is_hybris(struct wlr_buffer *buffer) {
++	return buffer->impl == &hybris_buffer_impl;
++}
++
++EGLClientBuffer hybris_buffer_get_native(struct wlr_buffer *buffer) {
++	return hybris_buffer_from_buffer(buffer)->native;
++}
++
++static void hybris_buffer_destroy(struct wlr_buffer *wlr_buffer) {
++	struct wlr_hybris_buffer *buffer = hybris_buffer_from_buffer(wlr_buffer);
++	wlr_buffer_finish(wlr_buffer);
++	WITH_HYBRIS_CONTEXT(buffer->egl,
++		buffer->egl->hybris.release_native_buffer(buffer->native));
++	free(buffer);
++}
++
++static bool hybris_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer,
++		uint32_t flags, void **data, uint32_t *format, size_t *stride) {
++	struct wlr_hybris_buffer *buffer = hybris_buffer_from_buffer(wlr_buffer);
++
++	EGLint usage = 0;
++	if (flags & WLR_BUFFER_DATA_PTR_ACCESS_READ) {
++		usage |= GRALLOC_USAGE_SW_READ_OFTEN;
++	}
++	if (flags & WLR_BUFFER_DATA_PTR_ACCESS_WRITE) {
++		usage |= GRALLOC_USAGE_SW_WRITE_OFTEN;
++	}
++	// gralloc lock makes CPU caches coherent but doesn't wait for the GPU
++	// (Android passes fences around instead): wait for our rendering first,
++	// or the CPU reads half-rendered tiles
++	EGLBoolean ok;
++	WITH_HYBRIS_CONTEXT(buffer->egl,
++		glFinish();
++		ok = buffer->egl->hybris.lock_native_buffer(buffer->native, usage, 0, 0,
++			wlr_buffer->width, wlr_buffer->height, data));
++	if (!ok) {
++		wlr_log(WLR_ERROR, "Failed to lock gralloc buffer");
++		return false;
++	}
++	*format = buffer->drm_format;
++	*stride = buffer->stride;
++	return true;
++}
++
++static void hybris_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer) {
++	struct wlr_hybris_buffer *buffer = hybris_buffer_from_buffer(wlr_buffer);
++	WITH_HYBRIS_CONTEXT(buffer->egl,
++		buffer->egl->hybris.unlock_native_buffer(buffer->native));
++}
++
++static const struct wlr_buffer_impl hybris_buffer_impl = {
++	.destroy = hybris_buffer_destroy,
++	.begin_data_ptr_access = hybris_buffer_begin_data_ptr_access,
++	.end_data_ptr_access = hybris_buffer_end_data_ptr_access,
++};
++
++static int hal_format_from_drm(uint32_t drm_format) {
++	// DRM formats are little-endian, HAL formats are named in byte order
++	switch (drm_format) {
++	case DRM_FORMAT_ARGB8888:
++	case DRM_FORMAT_XRGB8888:
++		return HAL_PIXEL_FORMAT_BGRA_8888;
++	case DRM_FORMAT_ABGR8888:
++		return HAL_PIXEL_FORMAT_RGBA_8888;
++	case DRM_FORMAT_XBGR8888:
++		return HAL_PIXEL_FORMAT_RGBX_8888;
++	default:
++		return -1;
++	}
++}
++
++static struct wlr_buffer *hybris_allocator_create_buffer(
++		struct wlr_allocator *wlr_alloc, int width, int height,
++		const struct wlr_drm_format *format) {
++	struct wlr_hybris_allocator *alloc = wl_container_of(wlr_alloc, alloc, base);
++
++	int hal_format = hal_format_from_drm(format->format);
++	if (hal_format < 0) {
++		wlr_log(WLR_ERROR, "Unsupported pixel format 0x%"PRIX32, format->format);
++		return NULL;
++	}
++	if (!wlr_drm_format_has(format, DRM_FORMAT_MOD_LINEAR) &&
++			!wlr_drm_format_has(format, DRM_FORMAT_MOD_INVALID)) {
++		wlr_log(WLR_ERROR, "gralloc buffers only support linear layout");
++		return NULL;
++	}
++
++	struct wlr_hybris_buffer *buffer = calloc(1, sizeof(*buffer));
++	if (buffer == NULL) {
++		return NULL;
++	}
++
++	EGLint usage = GRALLOC_USAGE_HW_RENDER | GRALLOC_USAGE_HW_TEXTURE |
++		GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
++	EGLint stride_px = 0;
++	EGLBoolean ok;
++	WITH_HYBRIS_CONTEXT(alloc->egl,
++		ok = alloc->egl->hybris.create_native_buffer(width, height, usage,
++			hal_format, &stride_px, &buffer->native));
++	if (!ok) {
++		wlr_log(WLR_ERROR, "Failed to allocate %dx%d gralloc buffer", width, height);
++		free(buffer);
++		return NULL;
++	}
++
++	wlr_buffer_init(&buffer->base, &hybris_buffer_impl, width, height);
++	buffer->egl = alloc->egl;
++	buffer->drm_format = format->format;
++	buffer->stride = (size_t)stride_px * 4;
++	return &buffer->base;
++}
++
++static void hybris_allocator_destroy(struct wlr_allocator *wlr_alloc) {
++	struct wlr_hybris_allocator *alloc = wl_container_of(wlr_alloc, alloc, base);
++	free(alloc);
++}
++
++static const struct wlr_allocator_interface hybris_allocator_impl = {
++	.create_buffer = hybris_allocator_create_buffer,
++	.destroy = hybris_allocator_destroy,
++};
++
++struct wlr_allocator *hybris_allocator_create(struct wlr_egl *egl) {
++	assert(egl->is_hybris);
++	struct wlr_hybris_allocator *alloc = calloc(1, sizeof(*alloc));
++	if (alloc == NULL) {
++		return NULL;
++	}
++	wlr_allocator_init(&alloc->base, &hybris_allocator_impl, WLR_BUFFER_CAP_DATA_PTR);
++	alloc->egl = egl;
++	wlr_log(WLR_DEBUG, "Created hybris gralloc allocator");
++	return &alloc->base;
++}
++
++/*
++ * wayland-android client buffers. libhybris owns the wl_buffer resource, so
++ * the wlr_buffer is found again through a destroy listener on it.
++ */
++
++struct wlr_hybris_wlegl_buffer {
++	struct wlr_buffer base;
++	struct wl_resource *resource; // NULL once the client destroyed it
++	bool has_alpha;
++	struct wl_listener resource_destroy;
++	struct wl_listener release;
++};
++
++// The wayland-android protocol is per process, as is libhybris' EGL state
++static struct wlr_egl *wlegl_egl = NULL;
++
++static const struct wlr_buffer_impl wlegl_buffer_impl;
++
++static struct wlr_hybris_wlegl_buffer *wlegl_buffer_from_buffer(
++		struct wlr_buffer *wlr_buffer) {
++	assert(wlr_buffer->impl == &wlegl_buffer_impl);
++	struct wlr_hybris_wlegl_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
++	return buffer;
++}
++
++bool wlr_buffer_is_hybris_wlegl(struct wlr_buffer *buffer) {
++	return buffer->impl == &wlegl_buffer_impl;
++}
++
++struct wl_resource *hybris_wlegl_buffer_get_resource(struct wlr_buffer *buffer) {
++	return wlegl_buffer_from_buffer(buffer)->resource;
++}
++
++bool hybris_wlegl_buffer_has_alpha(struct wlr_buffer *buffer) {
++	return wlegl_buffer_from_buffer(buffer)->has_alpha;
++}
++
++static void wlegl_buffer_destroy(struct wlr_buffer *wlr_buffer) {
++	struct wlr_hybris_wlegl_buffer *buffer = wlegl_buffer_from_buffer(wlr_buffer);
++	wl_list_remove(&buffer->release.link);
++	if (buffer->resource != NULL) {
++		wl_list_remove(&buffer->resource_destroy.link);
++	}
++	wlr_buffer_finish(wlr_buffer);
++	free(buffer);
++}
++
++static const struct wlr_buffer_impl wlegl_buffer_impl = {
++	.destroy = wlegl_buffer_destroy,
++};
++
++static void wlegl_buffer_handle_resource_destroy(struct wl_listener *listener,
++		void *data) {
++	struct wlr_hybris_wlegl_buffer *buffer =
++		wl_container_of(listener, buffer, resource_destroy);
++	wl_list_remove(&buffer->resource_destroy.link);
++	buffer->resource = NULL;
++	wlr_buffer_drop(&buffer->base);
++}
++
++static void wlegl_buffer_handle_release(struct wl_listener *listener, void *data) {
++	struct wlr_hybris_wlegl_buffer *buffer = wl_container_of(listener, buffer, release);
++	if (buffer->resource != NULL) {
++		wl_buffer_send_release(buffer->resource);
++	}
++}
++
++static bool wlegl_resource_is_instance(struct wl_resource *resource) {
++	EGLint width;
++	return wlegl_egl != NULL && wlegl_egl->hybris.query_wayland_buffer(
++		wlegl_egl->display, resource, EGL_WIDTH, &width);
++}
++
++static struct wlr_buffer *wlegl_buffer_from_resource(struct wl_resource *resource) {
++	struct wl_listener *listener = wl_resource_get_destroy_listener(resource,
++		wlegl_buffer_handle_resource_destroy);
++	if (listener != NULL) {
++		struct wlr_hybris_wlegl_buffer *buffer =
++			wl_container_of(listener, buffer, resource_destroy);
++		return &buffer->base;
++	}
++
++	EGLint width, height, texture_format;
++	if (!wlegl_egl->hybris.query_wayland_buffer(wlegl_egl->display, resource,
++				EGL_WIDTH, &width) ||
++			!wlegl_egl->hybris.query_wayland_buffer(wlegl_egl->display, resource,
++				EGL_HEIGHT, &height)) {
++		return NULL;
++	}
++	if (!wlegl_egl->hybris.query_wayland_buffer(wlegl_egl->display, resource,
++			EGL_TEXTURE_FORMAT, &texture_format)) {
++		texture_format = EGL_TEXTURE_RGBA;
++	}
++
++	struct wlr_hybris_wlegl_buffer *buffer = calloc(1, sizeof(*buffer));
++	if (buffer == NULL) {
++		return NULL;
++	}
++	wlr_buffer_init(&buffer->base, &wlegl_buffer_impl, width, height);
++	buffer->resource = resource;
++	buffer->has_alpha = texture_format != EGL_TEXTURE_RGB;
++
++	buffer->resource_destroy.notify = wlegl_buffer_handle_resource_destroy;
++	wl_resource_add_destroy_listener(resource, &buffer->resource_destroy);
++
++	buffer->release.notify = wlegl_buffer_handle_release;
++	wl_signal_add(&buffer->base.events.release, &buffer->release);
++
++	return &buffer->base;
++}
++
++static const struct wlr_buffer_resource_interface wlegl_resource_interface = {
++	.name = "android_wlegl",
++	.is_instance = wlegl_resource_is_instance,
++	.from_resource = wlegl_buffer_from_resource,
++};
++
++bool hybris_init_wl_display(struct wlr_egl *egl, struct wl_display *display) {
++	assert(egl->is_hybris);
++	if (wlegl_egl != NULL) {
++		return true;
++	}
++	if (!egl->hybris.bind_wayland_display(egl->display, display)) {
++		wlr_log(WLR_ERROR, "eglBindWaylandDisplayWL failed");
++		return false;
++	}
++	wlegl_egl = egl;
++	wlr_buffer_register_resource_interface(&wlegl_resource_interface);
++	wlr_log(WLR_INFO, "libhybris wayland-android buffer sharing enabled");
++	return true;
++}
+diff --git a/render/gles2/meson.build b/render/gles2/meson.build
+index a16ec40..a408240 100644
+--- a/render/gles2/meson.build
++++ b/render/gles2/meson.build
+@@ -10,6 +10,7 @@ features += { 'gles2-renderer': true }
+ wlr_deps += glesv2
+ 
+ wlr_files += files(
++	'hybris.c',
+ 	'pass.c',
+ 	'pixel_format.c',
+ 	'renderer.c',
+diff --git a/render/gles2/renderer.c b/render/gles2/renderer.c
+index e362dae..8c4cf30 100644
+--- a/render/gles2/renderer.c
++++ b/render/gles2/renderer.c
+@@ -139,12 +139,22 @@ struct wlr_gles2_buffer *gles2_buffer_get_or_create(struct wlr_gles2_renderer *r
+ 	buffer->renderer = renderer;
+ 
+ 	struct wlr_dmabuf_attributes dmabuf = {0};
+-	if (!wlr_buffer_get_dmabuf(wlr_buffer, &dmabuf)) {
++	if (renderer->egl->is_hybris && wlr_buffer_is_hybris(wlr_buffer)) {
++		buffer->image = wlr_egl_create_image_from_hybris(renderer->egl,
++			EGL_NATIVE_BUFFER_ANDROID, hybris_buffer_get_native(wlr_buffer));
++	} else if (renderer->egl->is_hybris && wlr_buffer_is_hybris_wlegl(wlr_buffer)) {
++		struct wl_resource *resource = hybris_wlegl_buffer_get_resource(wlr_buffer);
++		if (resource == NULL) {
++			goto error_buffer;
++		}
++		buffer->image = wlr_egl_create_image_from_hybris(renderer->egl,
++			EGL_WAYLAND_BUFFER_WL, (EGLClientBuffer)resource);
++	} else if (wlr_buffer_get_dmabuf(wlr_buffer, &dmabuf)) {
++		buffer->image = wlr_egl_create_image_from_dmabuf(renderer->egl,
++			&dmabuf, &buffer->external_only);
++	} else {
+ 		goto error_buffer;
+ 	}
+-
+-	buffer->image = wlr_egl_create_image_from_dmabuf(renderer->egl,
+-		&dmabuf, &buffer->external_only);
+ 	if (buffer->image == EGL_NO_IMAGE_KHR) {
+ 		goto error_buffer;
+ 	}
+@@ -179,6 +189,9 @@ static const struct wlr_drm_format_set *gles2_get_texture_formats(
+ static const struct wlr_drm_format_set *gles2_get_render_formats(
+ 		struct wlr_renderer *wlr_renderer) {
+ 	struct wlr_gles2_renderer *renderer = gles2_get_renderer(wlr_renderer);
++	if (renderer->egl->is_hybris) {
++		return &renderer->hybris_render_formats;
++	}
+ 	return wlr_egl_get_dmabuf_render_formats(renderer->egl);
+ }
+ 
+@@ -230,6 +243,7 @@ static void gles2_destroy(struct wlr_renderer *wlr_renderer) {
+ 	wlr_egl_destroy(renderer->egl);
+ 
+ 	wlr_drm_format_set_finish(&renderer->shm_texture_formats);
++	wlr_drm_format_set_finish(&renderer->hybris_render_formats);
+ 
+ 	if (renderer->drm_fd >= 0) {
+ 		close(renderer->drm_fd);
+@@ -510,6 +524,22 @@ struct wlr_renderer *wlr_gles2_renderer_create_with_drm_fd(int drm_fd) {
+ 	return renderer;
+ }
+ 
++struct wlr_renderer *wlr_gles2_renderer_create_hybris(void) {
++	struct wlr_egl *egl = wlr_egl_create_hybris();
++	if (egl == NULL) {
++		return NULL;
++	}
++
++	struct wlr_renderer *renderer = wlr_gles2_renderer_create(egl);
++	if (!renderer) {
++		wlr_log(WLR_ERROR, "Failed to create GLES2 renderer on libhybris");
++		wlr_egl_destroy(egl);
++		return NULL;
++	}
++
++	return renderer;
++}
++
+ struct wlr_renderer *wlr_gles2_renderer_create(struct wlr_egl *egl) {
+ 	if (!wlr_egl_make_current(egl, NULL)) {
+ 		return NULL;
+@@ -525,7 +555,9 @@ struct wlr_renderer *wlr_gles2_renderer_create(struct wlr_egl *egl) {
+ 	if (renderer == NULL) {
+ 		return NULL;
+ 	}
+-	wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl, WLR_BUFFER_CAP_DMABUF);
++	// libhybris renders into gralloc buffers (see hybris_allocator_create)
++	wlr_renderer_init(&renderer->wlr_renderer, &renderer_impl,
++		egl->is_hybris ? WLR_BUFFER_CAP_DATA_PTR : WLR_BUFFER_CAP_DMABUF);
+ 	renderer->wlr_renderer.features.output_color_transform = false;
+ 
+ 	wl_list_init(&renderer->buffers);
+@@ -541,7 +573,18 @@ struct wlr_renderer *wlr_gles2_renderer_create(struct wlr_egl *egl) {
+ 	wlr_log(WLR_INFO, "GL renderer: %s", glGetString(GL_RENDERER));
+ 	wlr_log(WLR_INFO, "Supported GLES2 extensions: %s", exts_str);
+ 
+-	if (!renderer->egl->exts.EXT_image_dma_buf_import) {
++	if (egl->is_hybris) {
++		static const uint32_t hybris_formats[] = {
++			DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888,
++			DRM_FORMAT_ABGR8888, DRM_FORMAT_XBGR8888,
++		};
++		for (size_t i = 0; i < sizeof(hybris_formats) / sizeof(hybris_formats[0]); i++) {
++			wlr_drm_format_set_add(&renderer->hybris_render_formats,
++				hybris_formats[i], DRM_FORMAT_MOD_INVALID);
++			wlr_drm_format_set_add(&renderer->hybris_render_formats,
++				hybris_formats[i], DRM_FORMAT_MOD_LINEAR);
++		}
++	} else if (!renderer->egl->exts.EXT_image_dma_buf_import) {
+ 		wlr_log(WLR_ERROR, "EGL_EXT_image_dma_buf_import not supported");
+ 		free(renderer);
+ 		return NULL;
+@@ -551,7 +594,11 @@ struct wlr_renderer *wlr_gles2_renderer_create(struct wlr_egl *egl) {
+ 		free(renderer);
+ 		return NULL;
+ 	}
+-	if (!check_gl_ext(exts_str, "GL_EXT_unpack_subimage")) {
++	// Core in OpenGL ES 3.0 (same enum values), which e.g. Mali doesn't
++	// advertise as an extension
++	int gl_major = 0;
++	sscanf((const char *)glGetString(GL_VERSION), "OpenGL ES %d", &gl_major);
++	if (!check_gl_ext(exts_str, "GL_EXT_unpack_subimage") && gl_major < 3) {
+ 		wlr_log(WLR_ERROR, "GL_EXT_unpack_subimage not supported");
+ 		free(renderer);
+ 		return NULL;
+diff --git a/render/gles2/texture.c b/render/gles2/texture.c
+index 9a967eb..28c0f6c 100644
+--- a/render/gles2/texture.c
++++ b/render/gles2/texture.c
+@@ -356,9 +356,9 @@ static struct wlr_texture *gles2_texture_from_pixels(
+ 	return &texture->wlr_texture;
+ }
+ 
+-static struct wlr_texture *gles2_texture_from_dmabuf(
++static struct wlr_texture *gles2_texture_from_image_buffer(
+ 		struct wlr_gles2_renderer *renderer, struct wlr_buffer *wlr_buffer,
+-		struct wlr_dmabuf_attributes *attribs) {
++		int width, int height, bool has_alpha) {
+ 	if (!renderer->procs.glEGLImageTargetTexture2DOES) {
+ 		return NULL;
+ 	}
+@@ -369,7 +369,7 @@ static struct wlr_texture *gles2_texture_from_dmabuf(
+ 	}
+ 
+ 	struct wlr_gles2_texture *texture =
+-		gles2_texture_create(renderer, attribs->width, attribs->height);
++		gles2_texture_create(renderer, width, height);
+ 	if (texture == NULL) {
+ 		return NULL;
+ 	}
+@@ -377,7 +377,7 @@ static struct wlr_texture *gles2_texture_from_dmabuf(
+ 	texture->target = buffer->external_only ? GL_TEXTURE_EXTERNAL_OES : GL_TEXTURE_2D;
+ 	texture->buffer = buffer;
+ 	texture->drm_format = DRM_FORMAT_INVALID; // texture can't be written anyways
+-	texture->has_alpha = pixel_format_has_alpha(attribs->format);
++	texture->has_alpha = has_alpha;
+ 
+ 	struct wlr_egl_context prev_ctx;
+ 	wlr_egl_make_current(renderer->egl, &prev_ctx);
+@@ -416,8 +416,23 @@ struct wlr_texture *gles2_texture_from_buffer(struct wlr_renderer *wlr_renderer,
+ 	uint32_t format;
+ 	size_t stride;
+ 	struct wlr_dmabuf_attributes dmabuf;
+-	if (wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
+-		return gles2_texture_from_dmabuf(renderer, buffer, &dmabuf);
++	if (renderer->egl->is_hybris && wlr_buffer_is_hybris_wlegl(buffer)) {
++		return gles2_texture_from_image_buffer(renderer, buffer,
++			buffer->width, buffer->height, hybris_wlegl_buffer_has_alpha(buffer));
++	} else if (renderer->egl->is_hybris && wlr_buffer_is_hybris(buffer)) {
++		void *unused_data;
++		uint32_t hybris_format;
++		size_t unused_stride;
++		if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ,
++				&unused_data, &hybris_format, &unused_stride)) {
++			return NULL;
++		}
++		wlr_buffer_end_data_ptr_access(buffer);
++		return gles2_texture_from_image_buffer(renderer, buffer,
++			buffer->width, buffer->height, pixel_format_has_alpha(hybris_format));
++	} else if (wlr_buffer_get_dmabuf(buffer, &dmabuf)) {
++		return gles2_texture_from_image_buffer(renderer, buffer,
++			dmabuf.width, dmabuf.height, pixel_format_has_alpha(dmabuf.format));
+ 	} else if (wlr_buffer_begin_data_ptr_access(buffer,
+ 			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
+ 		struct wlr_texture *tex = gles2_texture_from_pixels(wlr_renderer,
+diff --git a/render/wlr_renderer.c b/render/wlr_renderer.c
+index e65314c..7b0daac 100644
+--- a/render/wlr_renderer.c
++++ b/render/wlr_renderer.c
+@@ -28,6 +28,11 @@
+ #include "render/wlr_renderer.h"
+ #include "util/env.h"
+ 
++#if WLR_HAS_GLES2_RENDERER
++#include "render/egl.h"
++#include "render/hybris.h"
++#endif
++
+ void wlr_renderer_init(struct wlr_renderer *renderer,
+ 		const struct wlr_renderer_impl *impl, uint32_t render_buffer_caps) {
+ 	assert(impl->begin_buffer_pass);
+@@ -75,6 +80,16 @@ const struct wlr_drm_format_set *wlr_renderer_get_render_formats(
+ 
+ bool wlr_renderer_init_wl_shm(struct wlr_renderer *r,
+ 		struct wl_display *wl_display) {
++#if WLR_HAS_GLES2_RENDERER
++	// Compositors set up wl_shm in any case: also offer libhybris' GPU
++	// buffer sharing there (it has no DMA-BUF support)
++	if (wlr_renderer_is_gles2(r)) {
++		struct wlr_egl *egl = wlr_gles2_renderer_get_egl(r);
++		if (egl->is_hybris) {
++			hybris_init_wl_display(egl, wl_display);
++		}
++	}
++#endif
+ 	return wlr_shm_create_with_renderer(wl_display, 2, r) != NULL;
+ }
+ 
+@@ -233,6 +248,13 @@ static struct wlr_renderer *renderer_autocreate(struct wlr_backend *backend, int
+ 
+ 	if ((is_auto && WLR_HAS_GLES2_RENDERER) || strcmp(renderer_name, "gles2") == 0) {
+ 		if (!open_preferred_drm_fd(backend, &drm_fd, &own_drm_fd)) {
++#if WLR_HAS_GLES2_RENDERER
++			// No DRM device: an Android GPU driver through libhybris?
++			renderer = wlr_gles2_renderer_create_hybris();
++			if (renderer) {
++				goto out;
++			}
++#endif
+ 			log_creation_failure(is_auto, "Cannot create GLES2 renderer: no DRM FD available");
+ 		} else {
+ #if WLR_HAS_GLES2_RENDERER

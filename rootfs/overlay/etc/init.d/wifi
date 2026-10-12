@@ -19,6 +19,9 @@ depend() {
 start() {
 	ebegin "Starting WiFi (wlan0)"
 	ip link set wlan0 up || { eend 1 "wlan0 up failed (firmware?)"; return 1; }
+	# bcmdhd power saving suspends the chip and drops the connection (SSH
+	# sessions, downloads) every now and then
+	iw dev wlan0 set power_save off 2>/dev/null
 	wpa_supplicant -B -i wlan0 -D nl80211 -P "$pidfile" \
 		-c /etc/wpa_supplicant/wpa_supplicant.conf -f /var/log/wpa_supplicant.log
 	eend $? || return 1
@@ -27,6 +30,8 @@ start() {
 		wpa_cli -i wlan0 status 2>/dev/null | grep -q '^wpa_state=COMPLETED' && break
 		sleep 1
 	  done
+	  # the driver turns power saving back on when it associates
+	  iw dev wlan0 set power_save off 2>/dev/null
 	  pgrep -f 'dhcpcd: \[manager\]' >/dev/null && dhcpcd -n wlan0 >/dev/null 2>&1 ) &
 }
 

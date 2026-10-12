@@ -5,7 +5,8 @@
 #  - FORMATS USERDATA (internal storage, sda27) as ext4 and installs the
 #    ARMtix root filesystem there. The SD card is not touched.
 #  - Copies the Samsung WiFi/audio firmware from this phone's SYSTEM
-#    partition (the zip contains no Samsung blobs).
+#    partition and the Mali GPU driver (/vendor/lib64) from VENDOR (the zip
+#    contains no Samsung blobs).
 #  - Flashes the ARMtix kernel to BOOT.
 # Afterwards: TWRP -> Reboot -> System.
 
@@ -108,6 +109,29 @@ if [ -n "$V" ]; then
 else
 	ui "  WARNING: no Samsung vendor files on SYSTEM - WiFi and sound won't work."
 	ui "  (Flash a stock/Samsung-based ROM's SYSTEM first, then re-run this zip.)"
+fi
+
+# GPU: the Mali driver runs on ARMtix through libhybris (sway). It needs the
+# vendor's 64-bit libraries (libGLES_mali, gralloc, ...) and build.prop.
+ui "Copying the GPU driver from VENDOR ..."
+G=""
+for d in $SYSMNT/system/vendor $SYSMNT/vendor; do
+	[ -f $d/lib64/egl/libGLES_mali.so ] && { G=$d; break; }
+done
+if [ -z "$G" ] && [ -b /dev/block/by-name/VENDOR ]; then
+	grep -q " $VENMNT " /proc/mounts || mount -o ro /dev/block/by-name/VENDOR $VENMNT 2>/dev/null
+	[ -f $VENMNT/lib64/egl/libGLES_mali.so ] && G=$VENMNT
+fi
+if [ -n "$G" ]; then
+	rm -rf $ROOT/vendor/lib64
+	mkdir -p $ROOT/vendor
+	cp -a $G/lib64 $ROOT/vendor/ && cp -a $G/build.prop $ROOT/vendor/ 2>/dev/null
+	ui "  Mali driver: ok"
+	# the ARMtix kernel has the r16p0 Mali driver; userspace must match
+	grep -q 'r16p0' $ROOT/vendor/lib64/egl/libGLES_mali.so ||
+		ui "  WARNING: not a Mali r16p0 driver - sway will use software rendering"
+else
+	ui "  WARNING: no Mali driver on VENDOR - sway will use software rendering"
 fi
 umount $SYSMNT 2>/dev/null; umount $VENMNT 2>/dev/null
 progress 0.80

@@ -1,0 +1,39 @@
+// Touch panel for sway on the phone (big tap targets)
+{
+	"layer": "top",
+	"position": "top",
+	"height": 34,
+	"spacing": 2,
+	"modules-left": ["custom/apps", "custom/keyboard", "custom/rotate", "custom/close"],
+	"modules-center": ["clock"],
+	"modules-right": ["network", "pulseaudio", "custom/battery", "custom/power"],
+
+	"custom/apps":     { "format": "☰", "tooltip": false, "on-click": "fuzzel" },
+	"custom/keyboard": { "format": "⌨", "tooltip": false, "on-click": "armtix-osk toggle" },
+	"custom/rotate":   { "format": "⟳", "tooltip": false, "on-click": "armtix-rotate next" },
+	"custom/close":    { "format": "✕", "tooltip": false, "on-click": "swaymsg kill" },
+	"custom/power":    { "format": "⏻", "tooltip": false, "on-click": "armtix-power-menu" },
+
+	"clock": { "format": "{:%H:%M}", "tooltip-format": "{:%A %d %B %Y}" },
+	"network": {
+		"interface": "wlan0",
+		"format-wifi": "  {signalStrength}%",
+		"format-disconnected": "  off",
+		"format-ethernet": "USB",
+		"tooltip-format": "{essid} {ipaddr}",
+		"on-click": "armtix-wifi"
+	},
+	"pulseaudio": {
+		"format": "{icon} {volume}%",
+		"format-muted": " muted",
+		"format-icons": { "default": ["", "", ""] },
+		"on-click": "armtix-volume mute"
+	},
+	// waybar's battery module computes 0% from this fuel gauge: read the
+	// kernel's capacity/status directly
+	"custom/battery": {
+		"exec": "c=$(cat /sys/class/power_supply/battery/capacity); s=$(cat /sys/class/power_supply/battery/status); [ \"$s\" = Charging ] && i=\uf0e7 || i=\uf240; echo \"$i $c%\"",
+		"interval": 30,
+		"tooltip": false
+	}
+}

@@ -1,0 +1,68 @@
+# libhybris for ARMtix on the Galaxy S8+ (Exynos 8895, Mali-G71 r16p0).
+#
+# Loads the phone's Android GPU driver (/vendor/lib64/egl/libGLES_mali.so) into
+# glibc processes, as a GLVND EGL vendor: GLES apps use the GPU through the
+# normal libEGL/libGLESv2, Mesa stays available as fallback. Everything else
+# lives in /usr/lib/libhybris so it can't clash with system libraries.
+#
+# Needs a hybris-patched bionic in /system + /apex (armtix-hybris-gsi) and the
+# phone's /vendor/lib64 (copied from the VENDOR partition by the installer).
+pkgname=libhybris-armtix
+pkgver=0.1.0.r7079712
+pkgrel=4
+pkgdesc="Android GPU driver support (libhybris) for ARMtix on the Galaxy S8+"
+arch=(aarch64)
+url="https://github.com/libhybris/libhybris"
+license=(Apache-2.0)
+depends=(glibc libglvnd wayland armtix-hybris-gsi)
+makedepends=(git python libx11)
+provides=(libhybris)
+conflicts=(libhybris)
+backup=(etc/hybris/props.conf)
+_commit=7079712a42ea2754adf747e70c6cc75764c8596e
+_headers=217a38e92cc64a96b4d1ac7469f30827d84485d3 # android-headers halium-16.0
+source=("libhybris::git+https://github.com/libhybris/libhybris.git#commit=$_commit"
+        "android-headers::git+https://github.com/Halium/android-headers.git#commit=$_headers"
+        libhybris-armtix.patch
+        props.conf
+        hybris-run)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+	cd libhybris
+	patch -Np1 -i ../libhybris-armtix.patch
+	cd hybris
+	./autogen.sh
+}
+
+build() {
+	cd libhybris/hybris
+	# vulkan: the wrapper doesn't build against current Vulkan headers
+	./configure --prefix=/usr --libdir=/usr/lib/libhybris \
+		--libexecdir=/usr/lib/libhybris --bindir=/usr/lib/libhybris/bin \
+		--includedir=/usr/include/libhybris --sysconfdir=/etc \
+		--enable-arch=arm64 --with-android-headers="$srcdir/android-headers" \
+		--enable-mali-quirks --enable-wayland --enable-property-cache \
+		--enable-glvnd --with-default-egl-platform=wayland \
+		--with-default-hybris-ld-library-path=/vendor/lib64/egl:/vendor/lib64/hw:/vendor/lib64:/system/lib64 \
+		ac_cv_header_vulkan_vulkan_h=no \
+		CFLAGS="$CFLAGS -D_GNU_SOURCE" CXXFLAGS="$CXXFLAGS -D_GNU_SOURCE"
+	make
+}
+
+package() {
+	cd libhybris/hybris
+	make DESTDIR="$pkgdir" install
+	find "$pkgdir" -name '*.la' -delete
+	# GLVND looks the vendor library up by name, but it lives in a private libdir.
+	# Ordered after Mesa (50_mesa): apps get Mesa by default (big apps like
+	# Firefox need EGL features the Android driver lacks); the compositor
+	# asks for the Android platform, which only libhybris provides, and
+	# hybris-run puts single apps on the GPU.
+	sed 's|"libEGL_libhybris.so.0"|"/usr/lib/libhybris/libEGL_libhybris.so.0"|' \
+		"$pkgdir"/usr/share/glvnd/egl_vendor.d/10_libhybris.json \
+		> "$pkgdir"/usr/share/glvnd/egl_vendor.d/60_libhybris.json
+	rm "$pkgdir"/usr/share/glvnd/egl_vendor.d/10_libhybris.json
+	install -Dm644 "$srcdir/props.conf" "$pkgdir/etc/hybris/props.conf"
+	install -Dm755 "$srcdir/hybris-run" "$pkgdir/usr/bin/hybris-run"
+}

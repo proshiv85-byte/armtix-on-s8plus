@@ -1,0 +1,7 @@
+font=sans 10
+background-color=#1d2330ee
+text-color=#dfe3ea
+border-color=#3b82c4
+border-size=2
+default-timeout=4000
+anchor=top-center

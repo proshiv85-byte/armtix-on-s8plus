@@ -1,7 +1,22 @@
 #!/bin/sh
 # armtix-rotate [normal|right|left|inverted|next]
-# fbdev can only rotate when X starts: set the orientation, then restart the
-# XFCE session (autologin brings it straight back). Open windows are closed.
+# sway: rotates at once (the touchscreen follows the output).
+# XFCE: fbdev can only rotate when X starts: set the orientation, then restart
+# the session (autologin brings it straight back). Open windows are closed.
+if [ -n "$SWAYSOCK" ]; then
+	out=$(swaymsg -t get_outputs -r | sed -n 's/.*"name": "\([^"]*\)".*/\1/p' | head -1)
+	cur=$(swaymsg -t get_outputs -r | sed -n 's/.*"transform": "\([^"]*\)".*/\1/p' | head -1)
+	want=${1:-next}
+	if [ "$want" = next ]; then
+		# two orientations: portrait (USB down) <-> landscape (USB right)
+		case $cur in normal) want=right;; *) want=normal;; esac
+	fi
+	case $want in
+		normal) t=normal ;; right) t=90 ;; inverted) t=180 ;; left) t=270 ;;
+		*) echo "usage: $0 normal|right|left|inverted|next" >&2; exit 1 ;;
+	esac
+	exec swaymsg output "$out" transform $t
+fi
 sudo -n /usr/local/sbin/armtix-set-rotation "${1:-next}" || {
 	notify-send "Rotate" "armtix-set-rotation failed" 2>/dev/null; exit 1; }
 exec xfce4-session-logout --logout --fast

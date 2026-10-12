@@ -1,0 +1,9 @@
+#!/bin/sh
+# gl4es-x11-run <command...>: desktop OpenGL (GLX, up to 2.1) for X11 apps
+# under Xwayland (e.g. LWJGL 2 Minecraft): gl4es renders with OpenGL ES on the
+# Mali GPU (libhybris) into a pbuffer and copies frames to the X11 window.
+[ $# -gt 0 ] || { echo "usage: gl4es-x11-run <command> [args...]" >&2; exit 1; }
+export LD_LIBRARY_PATH=/usr/lib/gl4es-x11${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export LIBGL_EGL=/usr/lib/libEGL.so.1 LIBGL_GLES=/usr/lib/libGLESv2.so.2
+export LIBGL_FB=3 HYBRIS_EGLPLATFORM=null
+exec hybris-run "$@"

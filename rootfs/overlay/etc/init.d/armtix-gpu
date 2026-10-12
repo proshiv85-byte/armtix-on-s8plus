@@ -1,0 +1,14 @@
+#!/usr/bin/openrc-run
+# GPU access for the sway session. The Android Mali driver runs inside user
+# processes through libhybris (libhybris-armtix): it needs the Mali and ION
+# devices, sway needs the framebuffer. There's no udev on the 4.4 kernel to
+# set device permissions, so give them to the video group here.
+description="GPU/ION/framebuffer permissions for libhybris + sway"
+depend() { need localmount; before agetty.tty1 local seatd; }
+start() {
+	ebegin "Setting GPU device permissions"
+	for d in /dev/mali0 /dev/ion /dev/fb0; do
+		[ -e "$d" ] && chgrp video "$d" && chmod 0660 "$d"
+	done
+	eend 0
+}

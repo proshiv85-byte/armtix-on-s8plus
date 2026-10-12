@@ -1,0 +1,7 @@
+#!/bin/sh
+# Prism Launcher wrapper command for Minecraft with LWJGL 3: GLFW opens a
+# native Wayland window (no DISPLAY -> no X11), gl4es translates desktop
+# OpenGL 2.1 to OpenGL ES on the Mali GPU (libhybris).
+unset DISPLAY
+export XDG_SESSION_TYPE=wayland
+exec gl4es-run "$@"

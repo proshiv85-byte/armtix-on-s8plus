@@ -1,0 +1,34 @@
+# GLFW for Minecraft (LWJGL 3) on sway: old Minecraft versions treat every
+# GLFW error as fatal, including Wayland's "can't set the window icon /
+# position / cursor position". This build ignores those silently.
+# Private copy in /usr/lib/glfw-minecraft (Prism Launcher instance setting
+# "Use custom GLFW": /usr/lib/glfw-minecraft/libglfw.so.3).
+pkgname=glfw-minecraft
+pkgver=3.5.1
+pkgrel=1
+pkgdesc="GLFW with Wayland's unsupported-feature errors silenced, for old Minecraft"
+arch=(aarch64)
+url="https://www.glfw.org"
+license=(Zlib)
+depends=(glibc libxkbcommon wayland libdecor libx11 libxrandr libxinerama libxcursor libxi)
+makedepends=(git cmake wayland-protocols libxrender)
+source=("glfw::git+https://github.com/glfw/glfw.git#tag=$pkgver"
+        glfw-wayland-silent-unsupported.patch)
+sha256sums=('SKIP' 'SKIP')
+
+prepare() {
+	cd glfw
+	patch -Np1 -i ../glfw-wayland-silent-unsupported.patch
+}
+
+build() {
+	cmake -S glfw -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+		-DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF
+	cmake --build build
+}
+
+package() {
+	install -d "$pkgdir/usr/lib/glfw-minecraft"
+	cp -a build/src/libglfw.so* "$pkgdir/usr/lib/glfw-minecraft/"
+	install -Dm644 glfw/LICENSE.md -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

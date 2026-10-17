@@ -59,10 +59,28 @@ disk). Then `fex-run <x86 program>`.
 `steam-fex` sets up and starts the Steam client (needs the kernel's user
 namespaces and SysV IPC, both in `armtix_dream2lte_defconfig`). Games: game
 *Properties → Compatibility → "Legacy runtime 1.0"* (the newer Steam Linux
-Runtime containers don't start on this kernel). x86 games run as X11 apps
-under Xwayland; `guest/sdl-nomsaa.c` is a preload for SDL2 games that insist
-on multisampled visuals (Half-Life), with per-game settings in
-`~/.config/fex-emu/AppConfig/`.
+Runtime containers don't start on this kernel).
+
+x86 games run as X11 apps under Xwayland and render **in software**: the
+Mali driver is arm64-only and can't be used from x86 code. By default FEX
+emulates the game's x86 Mesa too, which is slow; FEX's **GL thunks** send
+the OpenGL calls to the native arm64 Mesa (llvmpipe) instead, so only the
+game is emulated. Per game, e.g. Half-Life,
+`~/.config/fex-emu/AppConfig/hl_linux.json` (file name = the executable):
+
+```json
+{
+  "Config": { "HostEnv": ["GALLIUM_DRIVER=llvmpipe"] },
+  "ThunksDB": { "GL": 1 }
+}
+```
+
+`guest/sdl-nomsaa.c` is a preload for SDL2 games that insist on multisampled
+GLX visuals, which llvmpipe under Xwayland doesn't offer (Half-Life asks for
+4x MSAA even with `-nomsaa`). Build it as 32-bit x86 on a PC (command in
+its header), copy it to `~/.local/lib/fex-guest/sdl-nomsaa.so` and set the
+game's launch options in Steam to
+`LD_PRELOAD=/home/armtix/.local/lib/fex-guest/sdl-nomsaa.so:$LD_PRELOAD %command%`.
 
 ## Minecraft (Prism Launcher)
 

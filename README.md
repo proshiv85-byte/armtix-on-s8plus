@@ -12,7 +12,7 @@ Android runs, its GPU driver is used through libhybris.
 |---|---|
 | Display | 1440×2960 AMOLED via the Samsung `decon` framebuffer: **sway** (wlroots with an fbdev backend), scale ×3 |
 | GPU | Mali-G71 with the phone's Android driver through **libhybris**: sway composites with OpenGL ES, and Wayland EGL apps (Firefox, GTK 4, Qt 6, SDL) render on the GPU; desktop OpenGL ≤ 2.1 apps via gl4es (`gl4es-run`), e.g. Minecraft 1.16.5 at ~40–50 fps. See [`hybris/`](hybris/README.md) |
-| x86 apps | **FEX-Emu** with a shim for the 4.4 kernel (`fex-run`): Steam runs (`steam-fex`), Half-Life is playable |
+| x86 apps | **FEX-Emu** with a shim for the 4.4 kernel (`fex-run`): Steam runs (`steam-fex`), Half-Life is playable (software OpenGL through FEX's GL thunks, see [`hybris/`](hybris/README.md#x86-programs-and-steam-fex-emu)) |
 | Camera | rear camera (12 MP): **Camera** app with live preview, auto exposure / white balance, JPEG photos in `~/Pictures` |
 | Desktop | minimal theme (JetBrains Mono, warm grays): status bar on top, apps / keyboard / rotate / close / power buttons at the bottom; launcher (fuzzel), notifications (mako), terminal (foot). `armtix-theme` switches themes |
 | Touch | multitouch screen (libinput), on-screen keyboard (wvkbd) |

@@ -16,7 +16,7 @@ Android runs, its GPU driver is used through libhybris.
 | Camera | rear camera (12 MP): **Camera** app with live preview, auto exposure / white balance, JPEG photos in `~/Pictures` |
 | Desktop | minimal theme (JetBrains Mono, warm grays): status bar on top, apps / keyboard / rotate / close / power buttons at the bottom; launcher (fuzzel), notifications (mako), terminal (foot). `armtix-theme` switches themes |
 | Touch | multitouch screen (libinput), on-screen keyboard (wvkbd) |
-| Rotation | portrait / landscape (USB right), separate wallpaper per orientation |
+| Rotation | portrait / landscape (USB right); optional wallpaper, one per orientation (none by default) |
 | PC keyboard/mouse | lan-mouse over the USB network: the PC's cursor continues on the phone |
 | WiFi | bcmdhd4361, wpa_supplicant + dhcpcd, touch-friendly picker |
 | USB | RNDIS network to a PC (`ssh armtix@172.16.42.1`), **OTG host**: USB keyboard / mouse / hubs (hotplug) |

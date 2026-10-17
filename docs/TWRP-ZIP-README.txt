@@ -25,7 +25,8 @@ First boot
     (default: minimal; themes in ~/.config/armtix-themes).
     Own wallpaper: copy it to ~/.config/armtix-themes/<theme>/sway/
     wallpaper.png (portrait) and wallpaper-landscape.png (optional, used
-    when rotated), then run `armtix-theme <theme>` again.
+    when rotated), then run `armtix-theme <theme>` again. Without these
+    files the background is just the theme's color.
     WiFi: "Wi-Fi" in the app menu. Power key: power menu. Volume keys: volume.
   - USB cable to a Linux PC: network, phone = 172.16.42.1
     (ssh armtix@172.16.42.1).

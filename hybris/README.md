@@ -42,7 +42,8 @@ Rootfs (`rootfs/overlay`): `armtix-gpu` (boot: `/dev/mali0`, `/dev/ion`,
 back to software rendering if the GPU path can't start), sway/waybar/foot/
 fuzzel/mako/foot configs as a theme (`armtix-theme`, themes in
 `~/.config/armtix-themes`), `armtix-osk` (keyboard toggle), `armtix-rotate`
-(also switches between the portrait and landscape wallpaper),
+(also sets the portrait or landscape wallpaper, or just the theme's
+background color when the theme has none),
 `armtix-power-menu`, `armtix-mc-gpu` (Minecraft wrapper), and a `bwrap`
 wrapper (see below). tty1 autologin starts sway (XFCE and Xorg were removed;
 Xwayland stays for X11 apps).

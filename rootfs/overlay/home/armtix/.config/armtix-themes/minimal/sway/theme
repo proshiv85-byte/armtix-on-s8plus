@@ -3,7 +3,9 @@
 # palette: base #111111  surface #1a1a1a  line #333333  dim #5c5c5c
 #          muted #8a8580  text #d6d2cc  bright #efebe6  sand #c8ab84
 #          slate #8d9aa4  rust #c27c6e
-output $out bg ~/.config/sway/wallpaper.png fill #111111
+# background color, behind the wallpaper or instead of it; the wallpaper is
+# the theme's sway/wallpaper.png (+ wallpaper-landscape.png), none = color only
+set $background #111111
 font pango:JetBrains Mono 8
 default_border pixel 1
 default_floating_border pixel 1

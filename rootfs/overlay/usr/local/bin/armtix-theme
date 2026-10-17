@@ -16,6 +16,8 @@ if [ -z "$1" ]; then
 fi
 [ -d "$T/$1" ] || { echo "armtix-theme: no theme '$1' in $T" >&2; exit 1; }
 cd "$T/$1" || exit 1
+# a theme without a wallpaper has none: don't keep the previous theme's
+rm -f "$D/sway/wallpaper.png" "$D/sway/wallpaper-landscape.png"
 find . -type f ! -name osk.conf | while read -r f; do
 	mkdir -p "$D/$(dirname "$f")" && cp -f "$f" "$D/$f"
 done

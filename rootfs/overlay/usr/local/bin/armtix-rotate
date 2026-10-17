@@ -2,8 +2,10 @@
 # armtix-rotate [normal|right|left|inverted|next|wallpaper]
 # Rotates the sway output at once (the touchscreen follows the output) and
 # switches the wallpaper: ~/.config/sway/wallpaper-landscape.png in landscape
-# if the theme has one, ~/.config/sway/wallpaper.png otherwise.
-# `armtix-rotate wallpaper` only sets the wallpaper for the current rotation.
+# if the theme has one, ~/.config/sway/wallpaper.png otherwise, and just the
+# theme's background color without a wallpaper.
+# `armtix-rotate wallpaper` only sets the wallpaper for the current rotation
+# (sway runs it at start).
 [ -n "$SWAYSOCK" ] || { echo "armtix-rotate: needs a running sway session" >&2; exit 1; }
 out=$(swaymsg -t get_outputs -r | sed -n 's/.*"name": "\([^"]*\)".*/\1/p' | head -1)
 cur=$(swaymsg -t get_outputs -r | sed -n 's/.*"transform": "\([^"]*\)".*/\1/p' | head -1)
@@ -14,9 +16,13 @@ wallpaper() {	# $1: sway transform
 	case $1 in 90|270|flipped-90|flipped-270)
 		[ -f "$W/wallpaper-landscape.png" ] && img=$W/wallpaper-landscape.png ;;
 	esac
-	# background color: the theme's (last #rrggbb on its "bg" line)
-	col=$(sed -n 's/^output .* bg .*\(#[0-9a-fA-F]\{6\}\).*/\1/p' "$W/theme" 2>/dev/null | head -1)
-	swaymsg -q output "$out" bg "$img" fill "${col:-#000000}"
+	# background color: the theme's "set $background #rrggbb"
+	col=$(sed -n 's/^set \$background \(#[0-9a-fA-F]\{6\}\).*/\1/p' "$W/theme" 2>/dev/null | head -1)
+	if [ -f "$img" ]; then
+		swaymsg -q output "$out" bg "$img" fill "${col:-#000000}"
+	else
+		swaymsg -q output "$out" bg "${col:-#000000}" solid_color
+	fi
 }
 
 want=${1:-next}

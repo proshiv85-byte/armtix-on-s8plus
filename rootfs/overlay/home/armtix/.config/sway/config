@@ -31,6 +31,8 @@ seat * hide_cursor 3000
 ### Look: colors, fonts, borders and wallpaper come from the theme
 # (armtix-theme, themes in ~/.config/armtix-themes)
 include ~/.config/sway/theme
+# wallpaper for the current rotation (or just the background color)
+exec_always armtix-rotate wallpaper
 # One window per screen like a phone, the others as tabs
 workspace_layout tabbed
 focus_on_window_activation focus

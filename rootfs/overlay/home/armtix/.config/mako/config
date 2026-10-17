@@ -1,7 +1,19 @@
-font=sans 10
-background-color=#1d2330ee
-text-color=#dfe3ea
-border-color=#3b82c4
-border-size=2
+# Notifications, minimal theme
+font=JetBrains Mono 9
+background-color=#111111f2
+text-color=#d6d2cc
+border-color=#3a3a3a
+border-size=1
+border-radius=0
+padding=10
+margin=6
+width=300
+max-icon-size=32
+progress-color=over #262626
 default-timeout=4000
-anchor=top-center
+anchor=top-right
+format=<b>%s</b>\n%b
+
+[urgency=high]
+border-color=#c27c6e
+default-timeout=0

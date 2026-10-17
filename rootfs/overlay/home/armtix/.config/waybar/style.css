@@ -1,17 +1,49 @@
+/* armtix minimal: palette in ~/.config/sway/theme */
 * {
-	font-family: sans-serif, "Font Awesome 6 Free", "Noto Sans Symbols 2";
-	font-size: 15px;
+	font-family: "JetBrains Mono";
+	font-size: 11px;
 	min-height: 0;
+	border: none;
+	border-radius: 0;
 }
+
 window#waybar {
-	background: #141821;
-	color: #dfe3ea;
+	background: rgba(14, 14, 14, 0.96);
+	color: #d6d2cc;
 }
+window#waybar.status { border-bottom: 1px solid #1f1f1f; }
+window#waybar.nav { border-top: 1px solid #1f1f1f; }
+
+#workspaces { margin-left: 6px; }
+#workspaces button {
+	padding: 0 5px;
+	color: #8a8580;
+	background: transparent;
+	box-shadow: none;
+}
+#workspaces button.focused { color: #efebe6; }
+#workspaces button.urgent { color: #c27c6e; }
+#workspaces button:hover { background: #1a1a1a; }
+
+#custom-clock { color: #d6d2cc; margin-left: 4px; }
+
+#network { padding-left: 10px; }
+#custom-battery { margin-right: 6px; }
+#network.disconnected, #network.disabled, #pulseaudio.muted { color: #8a8580; }
+#custom-battery.charging, #custom-battery.full { color: #c8ab84; }
+#custom-battery.low { color: #c8ab84; }
+#custom-battery.critical { color: #c27c6e; }
+
+/* bottom: text buttons with wide tap areas */
 #custom-apps, #custom-keyboard, #custom-rotate, #custom-close, #custom-power {
-	font-size: 20px;
-	padding: 0 12px;
+	font-size: 12px;
+	color: #8a8580;
+	padding: 0 14px;
 }
-#custom-power { color: #ff8a80; }
-#clock { font-weight: bold; }
-#network, #pulseaudio { padding: 0 6px; }
-#custom-battery { padding: 0 6px; }
+#custom-apps { color: #d6d2cc; }
+#custom-power { color: #c27c6e; }
+#custom-apps:hover, #custom-keyboard:hover, #custom-rotate:hover,
+#custom-close:hover, #custom-power:hover {
+	background: #1a1a1a;
+	color: #efebe6;
+}

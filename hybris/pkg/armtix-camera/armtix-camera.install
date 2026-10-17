@@ -1,0 +1,9 @@
+post_install() {
+	rc-update add armtix-camera boot >/dev/null 2>&1
+	rc-service armtix-camera start >/dev/null 2>&1
+	true
+}
+pre_remove() {
+	rc-update del armtix-camera boot >/dev/null 2>&1
+	true
+}

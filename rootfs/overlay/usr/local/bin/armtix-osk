@@ -4,9 +4,14 @@
 # SIGRTMIN toggle).
 K=wvkbd-mobintl
 running() { pgrep -u "$(id -u)" -x $K >/dev/null; }
+# colors and font: from the desktop theme (armtix-theme)
+OSK_FONT="JetBrains Mono 11"
+OSK_COLORS="--bg 0e0e0e --fg 1a1a1a --fg-sp 141414 --press 3a3a3a --press-sp 262626 --text d6d2cc --text-sp 8a8580"
+C=${XDG_CONFIG_HOME:-$HOME/.config}/armtix-osk.conf
+[ -f "$C" ] && . "$C"
 start() {
-	running || setsid -f $K --hidden -H 280 -L 200 \
-		--fn "Sans 12" >/dev/null 2>&1
+	# shellcheck disable=SC2086
+	running || setsid -f $K --hidden -H 280 -L 200 --fn "$OSK_FONT" $OSK_COLORS >/dev/null 2>&1
 }
 case ${1:-toggle} in
 	start)  start ;;

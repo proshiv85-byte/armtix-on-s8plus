@@ -1,6 +1,8 @@
-# sway on ARMtix, Galaxy S8+ (1440x2960, 70x143 mm). Touch first: the top bar
-# (waybar) has buttons for apps, the on-screen keyboard, rotation, closing the
-# focused window and the power menu. Super = Mod4 on a USB keyboard.
+# sway on ARMtix, Galaxy S8+ (1440x2960, 70x143 mm). Touch first: waybar has
+# buttons for apps, the on-screen keyboard, rotation, closing the focused
+# window and the power menu. Super = Mod4 on a USB keyboard.
+# The look is a theme: `armtix-theme` lists them, `armtix-theme minimal`
+# switches (themes in ~/.config/armtix-themes).
 #
 # Rendering: Mali GPU via libhybris; display: fbdev backend (see armtix-sway).
 
@@ -11,7 +13,7 @@ set $out FBDEV-fb0
 
 ### Output
 # scale 3 -> 480x987 logical pixels in portrait
-output $out scale 3 bg #1d2330 solid_color
+output $out scale 3
 
 ### Input
 # The touchscreen follows rotation (armtix-rotate)
@@ -23,19 +25,15 @@ input type:keyboard {
 	repeat_rate 30
 }
 input type:pointer accel_profile flat
+# touch first: the pointer (lan-mouse, USB mouse) hides when it's idle
+seat * hide_cursor 3000
 
-### Look
-font pango:sans 9
-default_border pixel 2
-default_floating_border normal 2
-titlebar_padding 8 6
-hide_edge_borders --i3 smart
+### Look: colors, fonts, borders and wallpaper come from the theme
+# (armtix-theme, themes in ~/.config/armtix-themes)
+include ~/.config/sway/theme
 # One window per screen like a phone, the others as tabs
 workspace_layout tabbed
 focus_on_window_activation focus
-client.focused          #3b82c4 #3b82c4 #ffffff #3b82c4 #3b82c4
-client.focused_inactive #2a3140 #2a3140 #c8ccd4 #2a3140 #2a3140
-client.unfocused        #1d2330 #1d2330 #8a90a0 #1d2330 #1d2330
 
 ### Phone buttons
 bindsym --locked XF86PowerOff exec armtix-power-menu
@@ -88,5 +86,9 @@ exec pulseaudio --start
 exec sh -c 'f=$HOME/.config/armtix-volume-set; [ -e "$f" ] && exit 0; sleep 4; pactl set-sink-volume speaker 30% && touch "$f"'
 exec mako
 exec armtix-osk start
-# keyboard/mouse from a PC (lan-mouse, if installed and configured)
-exec sh -c 'command -v lan-mouse >/dev/null && [ -f ~/.config/lan-mouse/config.toml ] && exec lan-mouse daemon > ~/.local/state/lan-mouse.log 2>&1'
+# screen on/off as set in /etc/armtix/screen.conf (sway would switch it on)
+exec armtix-screen apply
+# keyboard/mouse from a PC (lan-mouse, if installed and configured). A
+# receiver left over from a previous session holds the port but feeds a dead
+# Wayland display: replace it.
+exec sh -c 'command -v lan-mouse >/dev/null && [ -f ~/.config/lan-mouse/config.toml ] && { pkill -u "$USER" -x lan-mouse; exec lan-mouse daemon > ~/.local/state/lan-mouse.log 2>&1; }'

@@ -1,39 +1,64 @@
-// Touch panel for sway on the phone (big tap targets)
+// Minimal theme: status line on top, text buttons at the bottom (like a
+// phone's navigation bar). Dim brackets and slashes, lowercase, mono.
+[
 {
+	"name": "status",
 	"layer": "top",
 	"position": "top",
-	"height": 34,
-	"spacing": 2,
-	"modules-left": ["custom/apps", "custom/keyboard", "custom/rotate", "custom/close"],
-	"modules-center": ["clock"],
-	"modules-right": ["network", "pulseaudio", "custom/battery", "custom/power"],
+	"height": 26,
+	"spacing": 0,
+	// 480 px wide: no room to center the clock, it follows the workspaces
+	"modules-left": ["sway/workspaces", "custom/clock"],
+	"modules-right": ["network", "pulseaudio", "custom/battery"],
 
-	"custom/apps":     { "format": "☰", "tooltip": false, "on-click": "fuzzel" },
-	"custom/keyboard": { "format": "⌨", "tooltip": false, "on-click": "armtix-osk toggle" },
-	"custom/rotate":   { "format": "⟳", "tooltip": false, "on-click": "armtix-rotate next" },
-	"custom/close":    { "format": "✕", "tooltip": false, "on-click": "swaymsg kill" },
-	"custom/power":    { "format": "⏻", "tooltip": false, "on-click": "armtix-power-menu" },
-
-	"clock": { "format": "{:%H:%M}", "tooltip-format": "{:%A %d %B %Y}" },
+	"sway/workspaces": {
+		"format": "{icon}{name}",
+		"format-icons": { "focused": "*", "urgent": "!", "default": "" },
+		"disable-scroll": true
+	},
+	// lowercase date (strftime can't): a tiny script instead of "clock"
+	"custom/clock": {
+		"exec": "date '+%H:%M %a %d' | tr A-Z a-z",
+		"interval": 10,
+		"format": "<span color='#5c5c5c'>[</span> {} <span color='#5c5c5c'>]</span>",
+		"tooltip": false
+	},
 	"network": {
 		"interface": "wlan0",
-		"format-wifi": "  {signalStrength}%",
-		"format-disconnected": "  off",
-		"format-ethernet": "USB",
-		"tooltip-format": "{essid} {ipaddr}",
+		"format": "<span color='#5c5c5c'>[</span> net: --",
+		"format-wifi": "<span color='#5c5c5c'>[</span> net: {signalStrength}%",
+		"format-disconnected": "<span color='#5c5c5c'>[</span> net: off",
+		"format-disabled": "<span color='#5c5c5c'>[</span> net: off",
+		"tooltip-format-wifi": "{essid}\n{ipaddr}",
 		"on-click": "armtix-wifi"
 	},
 	"pulseaudio": {
-		"format": "{icon} {volume}%",
-		"format-muted": " muted",
-		"format-icons": { "default": ["", "", ""] },
-		"on-click": "armtix-volume mute"
+		"format": " <span color='#5c5c5c'>/</span> vol: {volume}%",
+		"format-muted": " <span color='#5c5c5c'>/</span> vol: mute",
+		"tooltip": false,
+		"on-click": "armtix-volume mute",
+		"on-scroll-up": "armtix-volume up",
+		"on-scroll-down": "armtix-volume down"
 	},
-	// waybar's battery module computes 0% from this fuel gauge: read the
-	// kernel's capacity/status directly
 	"custom/battery": {
-		"exec": "c=$(cat /sys/class/power_supply/battery/capacity); s=$(cat /sys/class/power_supply/battery/status); [ \"$s\" = Charging ] && i=\uf0e7 || i=\uf240; echo \"$i $c%\"",
+		"exec": "armtix-battery plain",
+		"return-type": "json",
 		"interval": 30,
-		"tooltip": false
+		"format": " <span color='#5c5c5c'>/</span> {} <span color='#5c5c5c'>]</span>"
 	}
+},
+{
+	"name": "nav",
+	"layer": "top",
+	"position": "bottom",
+	"height": 34,
+	"spacing": 0,
+	"modules-center": ["custom/apps", "custom/keyboard", "custom/rotate", "custom/close", "custom/power"],
+
+	"custom/apps":     { "format": "apps",   "tooltip": false, "on-click": "fuzzel" },
+	"custom/keyboard": { "format": "kbd",    "tooltip": false, "on-click": "armtix-osk toggle" },
+	"custom/rotate":   { "format": "rotate", "tooltip": false, "on-click": "armtix-rotate next" },
+	"custom/close":    { "format": "close",  "tooltip": false, "on-click": "swaymsg kill" },
+	"custom/power":    { "format": "power",  "tooltip": false, "on-click": "armtix-power-menu" }
 }
+]

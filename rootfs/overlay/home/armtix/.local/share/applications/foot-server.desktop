@@ -1,0 +1,5 @@
+[Desktop Entry]
+# hidden from the launcher (armtix)
+Type=Application
+Name=foot-server
+NoDisplay=true

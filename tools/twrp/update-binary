@@ -41,7 +41,8 @@ $BB unzip -o "$ZIP" armtix/boot.img armtix/caps.txt armtix/build-info \
 	armtix/sha256sums.boot armtix/sha256sums.rootfs -d $W >/dev/null 2>&1 \
 	|| abort "cannot unpack installer files"
 . $W/armtix/build-info 2>/dev/null
-ui "Build: ${BUILD_DATE:-?}  kernel ${KERNEL_VERSION:-?}"
+VARIANT=${VARIANT:-full}
+ui "Build: ${BUILD_DATE:-?}  kernel ${KERNEL_VERSION:-?}  ($VARIANT)"
 
 # ---------------------------------------------------------------- checks
 BL=$(getprop ro.boot.bootloader)
@@ -106,6 +107,22 @@ if [ -n "$V" ]; then
 	done
 	ui "  audio firmware: $n files"
 	[ -f $ROOT/vendor/firmware/calliope_sram.bin ] || ui "  WARNING: ABOX firmware missing - no sound"
+	# camera (FIMC-IS): loaded from /system/vendor/firmware, a link to /vendor
+	if [ "$VARIANT" != server ]; then
+		C=""
+		for d in $V $SYSMNT/system/vendor $SYSMNT/vendor; do
+			[ -f $d/firmware/fimc_is_lib.bin ] && { C=$d; break; }
+		done
+		if [ -z "$C" ] && [ -b /dev/block/by-name/VENDOR ]; then
+			grep -q " $VENMNT " /proc/mounts || mount -o ro /dev/block/by-name/VENDOR $VENMNT 2>/dev/null
+			[ -f $VENMNT/firmware/fimc_is_lib.bin ] && C=$VENMNT
+		fi
+		n=0
+		for f in $C/firmware/fimc_is_*.bin $C/firmware/setfile_*.bin $C/firmware/companion_*.bin; do
+			[ -n "$C" ] && [ -f "$f" ] && cp "$f" $ROOT/vendor/firmware/ && n=$((n+1))
+		done
+		ui "  camera firmware: $n files"
+	fi
 else
 	ui "  WARNING: no Samsung vendor files on SYSTEM - WiFi and sound won't work."
 	ui "  (Flash a stock/Samsung-based ROM's SYSTEM first, then re-run this zip.)"
@@ -113,6 +130,8 @@ fi
 
 # GPU: the Mali driver runs on ARMtix through libhybris (sway). It needs the
 # vendor's 64-bit libraries (libGLES_mali, gralloc, ...) and build.prop.
+# The server image has no graphics stack.
+if [ "$VARIANT" != server ]; then
 ui "Copying the GPU driver from VENDOR ..."
 G=""
 for d in $SYSMNT/system/vendor $SYSMNT/vendor; do
@@ -132,6 +151,7 @@ if [ -n "$G" ]; then
 		ui "  WARNING: not a Mali r16p0 driver - sway will use software rendering"
 else
 	ui "  WARNING: no Mali driver on VENDOR - sway will use software rendering"
+fi
 fi
 umount $SYSMNT 2>/dev/null; umount $VENMNT 2>/dev/null
 progress 0.80
@@ -157,6 +177,9 @@ progress 1.0
 ui " "
 ui "Done!  Now: Reboot -> System"
 ui "  login: armtix / armtix   (root / armtix)"
-ui "  Note: a cold power-on starts TWRP - use Reboot -> System."
+ui "  SSH over USB: 172.16.42.1"
+ui "  Screen on/off at boot: /data/etc/armtix/screen.conf"
+ui "    (here in TWRP: Mount -> Data, Advanced -> Terminal ->"
+ui "     echo SCREEN=off > /data/etc/armtix/screen.conf )"
 cleanup
 exit 0

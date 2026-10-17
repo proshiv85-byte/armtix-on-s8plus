@@ -1,22 +1,33 @@
 #!/bin/sh
-# armtix-rotate [normal|right|left|inverted|next]
-# sway: rotates at once (the touchscreen follows the output).
-# XFCE: fbdev can only rotate when X starts: set the orientation, then restart
-# the session (autologin brings it straight back). Open windows are closed.
-if [ -n "$SWAYSOCK" ]; then
-	out=$(swaymsg -t get_outputs -r | sed -n 's/.*"name": "\([^"]*\)".*/\1/p' | head -1)
-	cur=$(swaymsg -t get_outputs -r | sed -n 's/.*"transform": "\([^"]*\)".*/\1/p' | head -1)
-	want=${1:-next}
-	if [ "$want" = next ]; then
-		# two orientations: portrait (USB down) <-> landscape (USB right)
-		case $cur in normal) want=right;; *) want=normal;; esac
-	fi
-	case $want in
-		normal) t=normal ;; right) t=90 ;; inverted) t=180 ;; left) t=270 ;;
-		*) echo "usage: $0 normal|right|left|inverted|next" >&2; exit 1 ;;
+# armtix-rotate [normal|right|left|inverted|next|wallpaper]
+# Rotates the sway output at once (the touchscreen follows the output) and
+# switches the wallpaper: ~/.config/sway/wallpaper-landscape.png in landscape
+# if the theme has one, ~/.config/sway/wallpaper.png otherwise.
+# `armtix-rotate wallpaper` only sets the wallpaper for the current rotation.
+[ -n "$SWAYSOCK" ] || { echo "armtix-rotate: needs a running sway session" >&2; exit 1; }
+out=$(swaymsg -t get_outputs -r | sed -n 's/.*"name": "\([^"]*\)".*/\1/p' | head -1)
+cur=$(swaymsg -t get_outputs -r | sed -n 's/.*"transform": "\([^"]*\)".*/\1/p' | head -1)
+
+wallpaper() {	# $1: sway transform
+	W=${XDG_CONFIG_HOME:-$HOME/.config}/sway
+	img=$W/wallpaper.png
+	case $1 in 90|270|flipped-90|flipped-270)
+		[ -f "$W/wallpaper-landscape.png" ] && img=$W/wallpaper-landscape.png ;;
 	esac
-	exec swaymsg output "$out" transform $t
+	# background color: the theme's (last #rrggbb on its "bg" line)
+	col=$(sed -n 's/^output .* bg .*\(#[0-9a-fA-F]\{6\}\).*/\1/p' "$W/theme" 2>/dev/null | head -1)
+	swaymsg -q output "$out" bg "$img" fill "${col:-#000000}"
+}
+
+want=${1:-next}
+[ "$want" = wallpaper ] && { wallpaper "$cur"; exit; }
+if [ "$want" = next ]; then
+	# two orientations: portrait (USB down) <-> landscape (USB right)
+	case $cur in normal) want=right;; *) want=normal;; esac
 fi
-sudo -n /usr/local/sbin/armtix-set-rotation "${1:-next}" || {
-	notify-send "Rotate" "armtix-set-rotation failed" 2>/dev/null; exit 1; }
-exec xfce4-session-logout --logout --fast
+case $want in
+	normal) t=normal ;; right) t=90 ;; inverted) t=180 ;; left) t=270 ;;
+	*) echo "usage: $0 normal|right|left|inverted|next|wallpaper" >&2; exit 1 ;;
+esac
+swaymsg -q output "$out" transform $t
+wallpaper $t

@@ -1,0 +1,11 @@
+#!/bin/sh
+# steam-fex: the Steam client (x86) through FEX. First run sets Steam up from
+# the launcher's bootstrap; needs an x86 RootFS (FEXRootFSFetcher) and a
+# kernel with user namespaces + SysV IPC (Steam's container and client).
+S="${XDG_DATA_HOME:-$HOME/.local/share}/Steam"
+if [ ! -x "$S/steam.sh" ]; then
+	mkdir -p "$S"
+	tar -xJf /usr/lib/fex-compat/bootstraplinux_ubuntu12_32.tar.xz -C "$S" || exit 1
+fi
+export DISPLAY="${DISPLAY:-:0}"
+exec fex-run "$S/steam.sh" "$@"

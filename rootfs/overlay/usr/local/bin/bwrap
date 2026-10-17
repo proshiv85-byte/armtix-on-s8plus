@@ -1,0 +1,15 @@
+#!/bin/sh
+# bwrap wrapper. bubblewrap 0.13 needs mount syscalls the 4.4 kernel lacks
+# ("Can't open source /usr: Function not implemented"), which broke image
+# loading everywhere (gdk-pixbuf -> glycin runs every image decoder through
+# bwrap): no wallpaper, no thumbnails. glycin's loaders run unsandboxed here,
+# anything else goes to the real bwrap.
+for a in "$@"; do
+	case $a in
+	/usr/lib/glycin-loaders/*)
+		while [ "$1" != "$a" ]; do shift; done
+		exec "$@"
+		;;
+	esac
+done
+exec /usr/bin/bwrap "$@"

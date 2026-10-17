@@ -16,12 +16,18 @@ export WLR_LIBINPUT_NO_DEVICES=1
 export XDG_SESSION_TYPE=wayland XDG_SESSION_DESKTOP=sway XDG_CURRENT_DESKTOP=sway
 export MOZ_ENABLE_WAYLAND=1 QT_QPA_PLATFORM="wayland;xcb" SDL_VIDEODRIVER=wayland
 export GDK_BACKEND=wayland,x11 _JAVA_AWT_WM_NONREPARENTING=1
-# Apps render with Mesa's llvmpipe (libhybris is GLVND's second choice, see
-# hybris-run); skip Mesa's Zink attempt, there's no Vulkan driver
+# EGL apps render on the GPU: libhybris first, Mesa (llvmpipe) for what it
+# doesn't do (GBM, X11/Xwayland, desktop OpenGL apps: mesa-run <app>). Skip
+# Mesa's Zink attempt, there's no Vulkan driver.
 export GALLIUM_DRIVER=llvmpipe
+egl=/usr/share/glvnd/egl_vendor.d
+[ -z "$WLR_RENDERER" ] && [ -z "$__EGL_VENDOR_LIBRARY_FILENAMES" ] &&
+	export __EGL_VENDOR_LIBRARY_FILENAMES=$egl/60_libhybris.json:$egl/50_mesa.json
 
 mkdir -p ~/.local/state
 log=~/.local/state/sway.log
+# keep a core file (~/core, kernel.core_pattern=core) if the compositor crashes
+ulimit -c unlimited 2>/dev/null
 [ -f "$log" ] && mv -f "$log" "$log.old"
 start=$(date +%s)
 dbus-run-session $SWAY "$@" > "$log" 2>&1
@@ -30,6 +36,7 @@ if [ $rc -ne 0 ] && [ -z "$WLR_RENDERER" ] && [ $(( $(date +%s) - start )) -lt 1
 	# The GPU path failed to start (e.g. /vendor libraries missing):
 	# software rendering still gives a working desktop
 	mv -f "$log" "$log.gpu-failed"
+	unset __EGL_VENDOR_LIBRARY_FILENAMES
 	WLR_RENDERER=pixman exec dbus-run-session $SWAY "$@" > "$log" 2>&1
 fi
 exit $rc

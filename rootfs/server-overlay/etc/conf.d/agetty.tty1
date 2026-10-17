@@ -1,0 +1,3 @@
+# Server image: a normal login prompt on the phone screen (no autologin)
+agetty_options="--noclear"
+term_type="linux"

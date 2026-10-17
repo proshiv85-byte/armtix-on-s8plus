@@ -1,6 +1,7 @@
 #!/bin/sh
 # hybris-run <command...>: run a program with OpenGL ES/EGL on the Mali GPU
-# (Android driver through libhybris) instead of Mesa (software rendering).
+# (Android driver through libhybris) only, no Mesa fallback. The sway session
+# already prefers the GPU; this is for other sessions and for testing.
 # Works for Wayland GLES apps; desktop OpenGL/GLX stays on Mesa.
 [ $# -gt 0 ] || { echo "usage: hybris-run <command> [args...]" >&2; exit 1; }
 export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/60_libhybris.json

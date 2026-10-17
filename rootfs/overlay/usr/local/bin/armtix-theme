@@ -1,0 +1,52 @@
+#!/bin/sh
+# armtix-theme [name]  - switch the desktop look (sway, waybar, fuzzel, mako,
+# foot, on-screen keyboard, wallpaper). Without a name: list the themes.
+# A theme is a folder in ~/.config/armtix-themes whose files are copied over
+# the same paths in ~/.config (sway/theme, waybar/*, fuzzel/fuzzel.ini, ...;
+# osk.conf -> armtix-osk.conf). Edit a theme there, then re-apply it.
+D=${XDG_CONFIG_HOME:-$HOME/.config}
+T=$D/armtix-themes
+cur=$(cat "$T/current" 2>/dev/null)
+if [ -z "$1" ]; then
+	for t in "$T"/*/; do
+		t=$(basename "$t")
+		[ "$t" = "$cur" ] && echo "* $t" || echo "  $t"
+	done
+	exit 0
+fi
+[ -d "$T/$1" ] || { echo "armtix-theme: no theme '$1' in $T" >&2; exit 1; }
+cd "$T/$1" || exit 1
+find . -type f ! -name osk.conf | while read -r f; do
+	mkdir -p "$D/$(dirname "$f")" && cp -f "$f" "$D/$f"
+done
+[ -f osk.conf ] && cp -f osk.conf "$D/armtix-osk.conf"
+echo "$1" > "$T/current"
+
+# Apply to the running session without `swaymsg reload`: sway (fbdev +
+# libhybris) sometimes crashed shortly after a reload. The theme's lines are
+# sent as runtime commands instead; waybar reloads itself on SIGUSR2.
+# the socket of the running sway (crashed ones leave theirs behind)
+sock=
+for s in /run/user/"$(id -u)"/sway-ipc.*.sock; do
+	pid=${s%.sock}; pid=${pid##*.}
+	[ -S "$s" ] && [ -d /proc/"$pid" ] && sock=$s
+done
+if [ -n "$sock" ]; then
+	export SWAYSOCK=$sock
+	out=$(swaymsg -t get_outputs -r | sed -n 's/.*"name": "\([^"]*\)".*/\1/p' | head -1)
+	grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$D/sway/theme" |
+	sed -e "s/\\\$out/${out:-*}/" -e 's/^gaps \(inner\|outer\) \([0-9]*\)$/gaps \1 all set \2/' |
+	while read -r cmd; do
+		swaymsg -q "$cmd" 2>/dev/null
+	done
+	# the theme's bg line is the portrait one: fix it up for landscape
+	armtix-rotate wallpaper 2>/dev/null
+	pkill -USR2 -u "$(id -u)" -x waybar
+	makoctl reload 2>/dev/null
+	if pgrep -u "$(id -u)" -x wvkbd-mobintl >/dev/null; then
+		pkill -u "$(id -u)" -x wvkbd-mobintl
+		sleep 0.3
+		setsid -f armtix-osk start
+	fi
+fi
+echo "theme: $1 (new terminals use it)"

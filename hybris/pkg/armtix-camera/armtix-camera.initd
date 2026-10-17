@@ -1,0 +1,15 @@
+#!/usr/bin/openrc-run
+# Rear camera for armtix-camera: the FIMC-IS V4L2 nodes go to the video group
+# (no udev on the 4.4 kernel). Only permissions here: reading
+# /sys/class/camera/rear/fw_update (Samsung's camera hw init) during boot hung
+# the boot, the app does that itself when it starts.
+# Firmware: /system/vendor/firmware (copied from VENDOR by the installer).
+description="Camera device permissions"
+depend() { need localmount; after armtix-gpu armtix-fwload; }
+start() {
+	ebegin "Setting camera device permissions"
+	for d in /dev/video101 /dev/video109 /dev/video210; do
+		[ -e "$d" ] && chgrp video "$d" && chmod 0660 "$d"
+	done
+	eend 0
+}

@@ -1,0 +1,92 @@
+#!/bin/sh
+# armtix-screen on|off|toggle|status|apply [--save]
+#   on / off / toggle  switch the phone screen now (--save: also make it the
+#                      default at boot, in /etc/armtix/screen.conf)
+#   apply              switch to what /etc/armtix/screen.conf says
+#   status             print on/off
+# Inside a sway session the output is powered off through sway (it keeps
+# drawing nothing and comes back with `on`); without sway the framebuffer is
+# blanked (display controller + panel powered down) and the backlight set to 0.
+CONF=/etc/armtix/screen.conf
+FB=/sys/class/graphics/fb0
+BL=/sys/class/backlight/panel
+SAVED_BL=/run/armtix-screen.brightness
+
+usage() { echo "usage: armtix-screen on|off|toggle|status|apply [--save]" >&2; exit 1; }
+
+conf_value() {
+	v=$(sed -n 's/^[[:space:]]*SCREEN[[:space:]]*=[[:space:]]*"\{0,1\}\([a-zA-Z]*\).*/\1/p' "$CONF" 2>/dev/null | tail -1)
+	case $v in off|OFF|0|no) echo off ;; *) echo on ;; esac
+}
+
+# A live sway IPC socket, if a sway session is running
+sway_socket() {
+	for s in /run/user/*/sway-ipc.*.sock; do
+		[ -S "$s" ] || continue
+		p=${s##*/sway-ipc.}	# <uid>.<pid>.sock
+		p=${p#*.}
+		p=${p%.sock}
+		kill -0 "$p" 2>/dev/null && { echo "$s"; return 0; }
+	done
+	return 1
+}
+
+status() {
+	if s=$(sway_socket); then
+		SWAYSOCK=$s swaymsg -t get_outputs -r 2>/dev/null | grep -q '"power": true' && echo on || echo off
+	elif [ "$(cat $FB/blank 2>/dev/null)" = 4 ] || [ "$(cat $BL/brightness 2>/dev/null)" = 0 ]; then
+		echo off
+	else
+		echo on
+	fi
+}
+
+need_root() {
+	[ "$(id -u)" = 0 ] && return 0
+	exec sudo -n "$0" "$@"
+}
+
+switch() {
+	if s=$(sway_socket); then
+		[ "$1" = on ] && pw=on || pw=off
+		SWAYSOCK=$s swaymsg output '*' power $pw >/dev/null
+		return
+	fi
+	need_root "$1"
+	if [ "$1" = off ]; then
+		b=$(cat $BL/brightness 2>/dev/null)
+		[ -n "$b" ] && [ "$b" != 0 ] && echo "$b" > $SAVED_BL
+		echo 0 > $BL/brightness 2>/dev/null
+		echo 4 > $FB/blank     # FB_BLANK_POWERDOWN
+	else
+		echo 0 > $FB/blank     # FB_BLANK_UNBLANK
+		b=$(cat $SAVED_BL 2>/dev/null)
+		[ -n "$b" ] && [ "$b" != 0 ] || b=12800
+		echo "$b" > $BL/brightness 2>/dev/null
+	fi
+}
+
+save() {
+	[ "$(id -u)" = 0 ] || exec sudo -n "$0" "$1" --save
+	mkdir -p "${CONF%/*}"
+	if grep -q '^[[:space:]]*SCREEN[[:space:]]*=' "$CONF" 2>/dev/null; then
+		sed -i "s/^[[:space:]]*SCREEN[[:space:]]*=.*/SCREEN=$1/" "$CONF"
+	else
+		echo "SCREEN=$1" >> "$CONF"
+	fi
+}
+
+cmd=$1; opt=$2
+case $cmd in
+	on|off) want=$cmd ;;
+	toggle) [ "$(status)" = on ] && want=off || want=on ;;
+	apply) want=$(conf_value) ;;
+	status) status; exit 0 ;;
+	*) usage ;;
+esac
+case $opt in
+	--save) save "$want" ;;
+	"") ;;
+	*) usage ;;
+esac
+switch "$want"

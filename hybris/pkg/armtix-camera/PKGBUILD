@@ -1,0 +1,30 @@
+# Simple camera app for the S8+ rear camera: raw Bayer frames from Samsung's
+# FIMC-IS V4L2 driver (no ISP), debayered on the CPU, GPU preview (SDL3), JPEG
+# photos in ~/Pictures. Needs the ARMtix kernel's raw-capture patch
+# (camera/kernel-fimc-is-raw-capture.patch) and the camera firmware in
+# /system/vendor/firmware (copied from VENDOR by the TWRP installer).
+# shot.h: the driver's struct camera2_shot_ext, generated from the kernel's
+# DWARF with pahole.
+pkgname=armtix-camera
+pkgver=1.0
+pkgrel=3
+pkgdesc="Camera app for the Galaxy S8+ (Exynos) on ARMtix"
+arch=(aarch64)
+license=(MIT)
+depends=(sdl3 libjpeg-turbo libnotify)
+install=armtix-camera.install
+source=(armtix-camera.c shot.h armtix-camera.initd armtix-camera.desktop)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+build() {
+	gcc $CFLAGS $LDFLAGS -o armtix-camera armtix-camera.c -lSDL3 -ljpeg -lm
+}
+
+package() {
+	install -Dm755 armtix-camera "$pkgdir"/usr/bin/armtix-camera
+	install -Dm755 armtix-camera.initd "$pkgdir"/etc/init.d/armtix-camera
+	install -Dm644 armtix-camera.desktop "$pkgdir"/usr/share/applications/armtix-camera.desktop
+	# the driver loads its firmware from the Android path
+	install -d "$pkgdir"/system
+	ln -s /vendor "$pkgdir"/system/vendor
+}

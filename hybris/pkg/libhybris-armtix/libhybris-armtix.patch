@@ -140,7 +140,7 @@ index 019b7db..7735805 100644
  
  /* private:
 diff --git a/hybris/egl/egl.c b/hybris/egl/egl.c
-index 0051d37..80928b6 100644
+index 0051d37..4b081aa 100644
 --- a/hybris/egl/egl.c
 +++ b/hybris/egl/egl.c
 @@ -232,7 +232,11 @@ EGLDisplay __eglHybrisGetPlatformDisplayCommon(EGLenum platform,
@@ -156,6 +156,143 @@ index 0051d37..80928b6 100644
  			break;
  
  #ifdef WANT_WAYLAND
+@@ -329,6 +333,52 @@ const char * eglQueryString(EGLDisplay dpy, EGLint name)
+ 
+ HYBRIS_IMPLEMENT_FUNCTION4(egl, EGLBoolean, eglGetConfigs, EGLDisplay, EGLConfig *, EGLint, EGLint *);
+ HYBRIS_IMPLEMENT_FUNCTION5(egl, EGLBoolean, eglChooseConfig, EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
++
++/*
++ * The Android driver only does OpenGL ES, but toolkits built for desktop GL
++ * (Arch's Qt 6) bind the GLES API and still ask for EGL_OPENGL_BIT configs,
++ * which match nothing. Offer the GLES configs instead: Qt reads
++ * EGL_RENDERABLE_TYPE back from the config, sees no EGL_OPENGL_BIT and
++ * switches the context (and its shaders) to GLES. Apps that bound the
++ * desktop GL API keep getting no config, so they can fall back themselves.
++ */
++#ifdef WANT_GLVND
++extern EGLenum hybris_egl_current_api(void);
++#else
++static EGLenum hybris_egl_current_api(void) { return EGL_OPENGL_ES_API; }
++#endif
++
++static EGLBoolean (*_eglChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *,
++		EGLint, EGLint *) = NULL;
++
++static EGLBoolean _my_eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list,
++		EGLConfig *configs, EGLint config_size, EGLint *num_config)
++{
++	EGLint *attrs = NULL;
++	int n = 0;
++
++	HYBRIS_DLSYSM(egl, &_eglChooseConfig, "eglChooseConfig");
++	while (attrib_list != NULL && attrib_list[n] != EGL_NONE)
++		n += 2;
++	for (int i = 0; i < n && hybris_egl_current_api() == EGL_OPENGL_ES_API; i += 2) {
++		if (attrib_list[i] != EGL_RENDERABLE_TYPE ||
++		    !(attrib_list[i + 1] & EGL_OPENGL_BIT))
++			continue;
++		if (!attrs) {
++			attrs = malloc((n + 1) * sizeof(EGLint));
++			if (!attrs)
++				break;
++			memcpy(attrs, attrib_list, (n + 1) * sizeof(EGLint));
++		}
++		attrs[i + 1] = (attrs[i + 1] & ~EGL_OPENGL_BIT) |
++			EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR;
++	}
++
++	EGLBoolean ret = (*_eglChooseConfig)(dpy, attrs ? attrs : attrib_list,
++			configs, config_size, num_config);
++	free(attrs);
++	return ret;
++}
+ HYBRIS_IMPLEMENT_FUNCTION4(egl, EGLBoolean, eglGetConfigAttrib, EGLDisplay, EGLConfig, EGLint, EGLint *);
+ 
+ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
+@@ -435,15 +485,48 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
+ {
+ 	HYBRIS_DLSYSM(egl, &_eglCreateContext, "eglCreateContext");
+ 
++	/*
++	 * Desktop GL requests that ended up on a GLES config (see
++	 * _my_eglChooseConfig): clamp the version to GLES 3.2 and drop the
++	 * desktop-only attributes, which the driver rejects.
++	 */
++	EGLint attrs[64];
++	int n = 0, major = -1, minor_idx = -1;
+ 	const EGLint *p = attrib_list;
+-	while (p != NULL && *p != EGL_NONE) {
+-		if (*p == EGL_CONTEXT_CLIENT_VERSION) {
+-			_egl_context_client_version = p[1];
++	while (p != NULL && *p != EGL_NONE && n < 60) {
++		switch (p[0]) {
++		case EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR:
++		case 0x31B1: /* EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE */
++			break;
++		case EGL_CONTEXT_FLAGS_KHR:
++			attrs[n++] = p[0];
++			attrs[n++] = p[1] & ~EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR;
++			break;
++		case EGL_CONTEXT_CLIENT_VERSION:
++			major = p[1] > 3 ? 3 : p[1];
++			attrs[n++] = p[0];
++			attrs[n++] = major;
++			break;
++		case EGL_CONTEXT_MINOR_VERSION_KHR:
++			minor_idx = n;
++			/* fall through */
++		default:
++			attrs[n++] = p[0];
++			attrs[n++] = p[1];
++			break;
+ 		}
+ 		p += 2;
+ 	}
+-
+-	return (*_eglCreateContext)(dpy, config, share_context, attrib_list);
++	attrs[n] = EGL_NONE;
++	if (minor_idx >= 0 && major == 3 && attrs[minor_idx + 1] > 2)
++		attrs[minor_idx + 1] = 2;
++	if (minor_idx >= 0 && major == 2)
++		attrs[minor_idx + 1] = 0;
++	if (major > 0)
++		_egl_context_client_version = major;
++
++	return (*_eglCreateContext)(dpy, config, share_context,
++			attrib_list ? attrs : NULL);
+ }
+ 
+ HYBRIS_IMPLEMENT_FUNCTION2(egl, EGLBoolean, eglDestroyContext, EGLDisplay, EGLContext);
+@@ -551,6 +634,10 @@ struct FuncNamePair {
+ static struct FuncNamePair _eglHybrisOverrideFunctions[] = {
+ 	OVERRIDE_MY(eglCreateImageKHR),
+ 	OVERRIDE_MY(eglSwapBuffersWithDamageEXT),
++	/* Same signature; without this the driver's own version runs, which
++	 * queues buffers the Wayland platform never attaches (Firefox hangs). */
++	OVERRIDE_TO(eglSwapBuffersWithDamageKHR, _my_eglSwapBuffersWithDamageEXT),
++	OVERRIDE_MY(eglChooseConfig),
+ 	OVERRIDE_MY(glEGLImageTargetTexture2DOES),
+ 	OVERRIDE_MY(glEGLImageTargetRenderbufferStorageOES),
+ 	OVERRIDE_MY(eglDestroyImageKHR),
+diff --git a/hybris/egl/glvnd/eglglvnd.cpp b/hybris/egl/glvnd/eglglvnd.cpp
+index 68786cc..3dc3b64 100644
+--- a/hybris/egl/glvnd/eglglvnd.cpp
++++ b/hybris/egl/glvnd/eglglvnd.cpp
+@@ -107,6 +107,14 @@ __eglGLVNDGetVendorString(int name)
+     return NULL;
+ }
+ 
++/* The API the app bound: GLVND keeps it, eglBindAPI never reaches us. */
++extern "C" EGLenum hybris_egl_current_api(void)
++{
++    if (__eglGLVNDApiExports && __eglGLVNDApiExports->getCurrentApi)
++        return __eglGLVNDApiExports->getCurrentApi();
++    return EGL_OPENGL_ES_API;
++}
++
+ static EGLBoolean __eglGLVNDgetSupportsAPI (EGLenum api)
+ {
+     return api == EGL_OPENGL_ES_API;
 diff --git a/hybris/egl/platforms/wayland/eglplatform_wayland.cpp b/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
 index 873451e..5fd73fa 100644
 --- a/hybris/egl/platforms/wayland/eglplatform_wayland.cpp

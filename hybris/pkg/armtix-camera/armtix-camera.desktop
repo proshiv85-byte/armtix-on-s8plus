@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Camera
+Comment=Take photos with the rear camera
+Exec=armtix-camera
+Icon=camera-photo
+Terminal=false
+Categories=Graphics;Photography;

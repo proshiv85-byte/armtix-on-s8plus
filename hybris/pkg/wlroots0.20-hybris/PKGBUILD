@@ -4,9 +4,11 @@
 #    used automatically when there is no DRM device (or WLR_BACKENDS=fbdev)
 #  - GLES2 rendering on the Android Mali driver through libhybris: gralloc
 #    render buffers and GPU clients sharing buffers via wayland-android
+#  - frames copied to /dev/fb0 on 4 threads with a NEON red/blue swap
+#    (WLR_FBDEV_THREADS, WLR_FBDEV_STATS=1 logs the timings)
 pkgname=wlroots0.20-hybris
 pkgver=0.20.2
-pkgrel=2
+pkgrel=3
 pkgdesc="Modular Wayland compositor library, with fbdev backend and libhybris GPU rendering"
 arch=(aarch64)
 url="https://gitlab.freedesktop.org/wlroots/wlroots"
@@ -21,13 +23,16 @@ optdepends=('libhybris-armtix: GPU rendering with the Android Mali driver'
 provides=("wlroots0.20=$pkgver" libwlroots-0.20.so)
 conflicts=(wlroots0.20)
 source=("https://gitlab.freedesktop.org/wlroots/wlroots/-/releases/$pkgver/downloads/wlroots-$pkgver.tar.gz"
-        wlroots-0.20.2-hybris-fbdev.patch)
+        wlroots-0.20.2-hybris-fbdev.patch
+        wlroots-0.20.2-fbdev-fast-copy.patch)
 sha256sums=('80c567d2ed4efb2cfa6b077f22c7a710d9c78ba4e185a75e8694001114af0733'
+            'SKIP'
             'SKIP')
 
 prepare() {
 	cd wlroots-$pkgver
 	patch -Np1 -i ../wlroots-0.20.2-hybris-fbdev.patch
+	patch -Np1 -i ../wlroots-0.20.2-fbdev-fast-copy.patch
 }
 
 build() {

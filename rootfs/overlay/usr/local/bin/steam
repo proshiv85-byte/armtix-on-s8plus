@@ -1,0 +1,4 @@
+#!/bin/sh
+# Steam's own shortcuts (game .desktop files, steam:// links) run `steam`:
+# here that's the x86 client through FEX.
+exec steam-fex "$@"

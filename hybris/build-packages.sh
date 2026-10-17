@@ -10,7 +10,7 @@ OUT="$H/out"
 mkdir -p "$OUT"
 export MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}"
 # Order matters: libhybris-armtix depends on armtix-hybris-gsi
-PKGS="${*:-armtix-hybris-gsi libhybris-armtix libudev-zero-armtix wlroots0.20-hybris wvkbd gl4es-armtix glfw-minecraft lan-mouse-armtix}"
+PKGS="${*:-armtix-hybris-gsi libhybris-armtix libudev-zero-armtix wlroots0.20-hybris wvkbd gl4es-armtix glfw-minecraft lan-mouse-armtix armtix-camera}"
 for p in $PKGS; do
 	echo "==> $p"
 	cd "$H/pkg/$p"

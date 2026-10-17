@@ -1,0 +1,8 @@
+#!/bin/sh
+# mesa-run <command...>: run a program with Mesa (llvmpipe, software rendering)
+# instead of the Mali GPU. The sway session puts EGL apps on the GPU; use
+# this for apps that need desktop OpenGL over EGL, which the Android driver
+# doesn't have (or try gl4es-run for OpenGL <= 2.1).
+[ $# -gt 0 ] || { echo "usage: mesa-run <command> [args...]" >&2; exit 1; }
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+exec "$@"

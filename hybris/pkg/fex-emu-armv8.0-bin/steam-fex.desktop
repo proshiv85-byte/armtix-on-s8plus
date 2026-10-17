@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Steam (FEX)
+Comment=Steam for x86, emulated with FEX-Emu
+Exec=steam-fex %U
+Icon=steam
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Game;
+MimeType=x-scheme-handler/steam;x-scheme-handler/steamlink;

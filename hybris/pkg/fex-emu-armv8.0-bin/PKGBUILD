@@ -1,0 +1,44 @@
+# FEX-Emu (x86/x86-64 on arm64), ARMv8.0 build from the upstream Ubuntu PPA
+# (the Exynos 8895 has no LSE atomics). Repackaged as-is: the paths are built
+# in (host thunks in /usr/lib/aarch64-linux-gnu/fex-emu). No binfmt_misc in
+# the 4.4 kernel: x86 programs are started explicitly (fex-run, below).
+# FEXConfig (Qt 5 GUI) isn't usable, edit ~/.config/fex-emu/Config.json.
+# fex-compat.so fills in what FEX needs from kernels newer than 4.4: start
+# programs with fex-run (Steam: steam-fex).
+pkgname=fex-emu-armv8.0-bin
+pkgver=2610
+pkgrel=3
+_deb=fex-emu-armv8.0_${pkgver}-1~r_arm64.deb
+pkgdesc="Fast x86/x86-64 emulator for arm64 (ARMv8.0 build, upstream binaries)"
+arch=(aarch64)
+url="https://fex-emu.com"
+license=(MIT)
+depends=(glibc gcc-libs libglvnd squashfuse fuse3 curl xz)
+optdepends=('squashfs-tools: extract a RootFS image instead of mounting it')
+provides=(fex-emu)
+conflicts=(fex-emu)
+options=(!strip !debug)
+noextract=("$_deb")
+source=("https://ppa.launchpadcontent.net/fex-emu/fex/ubuntu/pool/main/f/fex-emu-armv8.0/$_deb"
+        "steam_latest.tar.gz::https://repo.steampowered.com/steam/archive/stable/steam_latest.tar.gz"
+        fex-compat.c
+        fex-run
+        steam-fex
+        steam-fex.desktop)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+build() {
+	gcc $CFLAGS -shared -fPIC -o fex-compat.so fex-compat.c -ldl
+}
+
+package() {
+	bsdtar -xOf "$_deb" 'data.tar.*' | bsdtar -xf - -C "$pkgdir"
+	rm -f "$pkgdir"/usr/bin/FEXConfig
+	install -Dm755 fex-compat.so "$pkgdir"/usr/lib/fex-compat/fex-compat.so
+	install -Dm644 steam-launcher/bootstraplinux_ubuntu12_32.tar.xz \
+		"$pkgdir"/usr/lib/fex-compat/bootstraplinux_ubuntu12_32.tar.xz
+	install -Dm755 fex-run "$pkgdir"/usr/bin/fex-run
+	install -Dm755 steam-fex "$pkgdir"/usr/bin/steam-fex
+	install -Dm644 steam-fex.desktop "$pkgdir"/usr/share/applications/steam-fex.desktop
+	install -Dm644 steam-launcher/icons/256/steam.png "$pkgdir"/usr/share/icons/hicolor/256x256/apps/steam.png
+}

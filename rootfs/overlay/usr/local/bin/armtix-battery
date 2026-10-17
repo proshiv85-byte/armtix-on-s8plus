@@ -1,0 +1,24 @@
+#!/bin/sh
+# waybar battery (custom module, JSON). The fuel gauge reports charge_now=1,
+# so waybar's own battery module shows 0%: read capacity/status directly.
+mode=$1
+B=/sys/class/power_supply/battery
+c=$(cat $B/capacity 2>/dev/null || echo 0)
+s=$(cat $B/status 2>/dev/null || echo Unknown)
+set -- 󰂎 󰁺 󰁻 󰁼 󰁽 󰁾 󰁿 󰂀 󰂁 󰂂 󰁹
+i=$((c / 10 + 1)); [ $i -gt 11 ] && i=11
+eval icon=\${$i}
+class=normal
+case $s in
+	Charging) class=charging; icon=󰂄 ;;
+	Full) class=full ;;
+	*) [ "$c" -le 10 ] && class=critical || { [ "$c" -le 20 ] && class=low; } ;;
+esac
+# `armtix-battery plain`: text instead of an icon (minimal theme)
+if [ "$mode" = plain ]; then
+	t="bat: $c%"
+	[ "$s" = Charging ] && t="bat: $c%+"
+else
+	t="$icon $c%"
+fi
+printf '{"text":"%s","class":"%s","tooltip":"Battery %s%% (%s)"}\n' "$t" "$class" "$c" "$s"

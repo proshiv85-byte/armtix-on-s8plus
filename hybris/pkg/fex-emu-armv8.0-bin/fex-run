@@ -1,0 +1,8 @@
+#!/bin/sh
+# fex-run <x86 program> [args...]: run an x86/x86-64 program with FEX on the
+# 4.4 kernel. fex-compat.so emulates what FEX needs from newer kernels
+# (MAP_FIXED_NOREPLACE, ID registers, openat2, ...); it stays out of the
+# x86 program's environment and follows FEX into child processes.
+[ $# -gt 0 ] || { echo "usage: fex-run <program> [args...]" >&2; exit 1; }
+export LD_PRELOAD=/usr/lib/fex-compat/fex-compat.so${LD_PRELOAD:+:$LD_PRELOAD}
+exec /usr/bin/FEX "$@"

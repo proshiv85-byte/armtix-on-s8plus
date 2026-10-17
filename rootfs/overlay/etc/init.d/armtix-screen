@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# Phone screen on/off at boot, from /etc/armtix/screen.conf (armtix-screen).
+description="Switch the phone screen on or off as configured"
+
+depend() {
+	after armtix-bootcheck
+}
+
+start() {
+	ebegin "Screen: $(sed -n 's/^[[:space:]]*SCREEN[[:space:]]*=[[:space:]]*//p' /etc/armtix/screen.conf 2>/dev/null | tail -1)"
+	/usr/local/bin/armtix-screen apply
+	eend 0
+}

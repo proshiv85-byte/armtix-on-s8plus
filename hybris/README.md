@@ -3,10 +3,11 @@
 The Exynos 8895's Mali-G71 has no usable open driver for this kernel, so ARMtix
 runs the phone's **Android Mali driver** inside normal glibc programs with
 [libhybris](https://github.com/libhybris/libhybris). The desktop for it is
-**sway** (wlroots), compositing with OpenGL ES on the GPU. Apps use Mesa
-(software) by default and opt in to the GPU: OpenGL ES apps with `hybris-run`,
-desktop OpenGL ≤ 2.1 apps (e.g. Minecraft ≤ 1.16) through gl4es with
-`gl4es-run`.
+**sway** (wlroots), compositing with OpenGL ES on the GPU. Its EGL apps
+(Firefox, Qt, GTK 4, ...) render on the GPU too; Mesa (software) stays the
+fallback for what the Android driver can't do (`mesa-run <app>` forces it).
+Desktop OpenGL ≤ 2.1 apps (e.g. Minecraft ≤ 1.16) run on the GPU through
+gl4es with `gl4es-run`.
 
 ```
  app (GLES, Wayland) ──EGL──► glvnd ─► libhybris ─► /vendor/lib64/egl/libGLES_mali.so ─► /dev/mali0
@@ -20,12 +21,14 @@ desktop OpenGL ≤ 2.1 apps (e.g. Minecraft ≤ 1.16) through gl4es with
 | Package (`hybris/pkg/`) | What |
 |---|---|
 | `armtix-hybris-gsi` | `/system` + `/apex`: hybris-patched bionic and the ~20 Android system libraries the driver loads, from the Halium 16 arm64 GSI (3 MB, see `PROVENANCE`). Stock Android bionic can't work: its TLS slots collide with glibc's. |
-| `libhybris-armtix` | libhybris as a **GLVND EGL vendor**, ordered *after* Mesa (`60_libhybris.json`): apps use Mesa (llvmpipe) by default, because big apps (Firefox, Qt/GTK toolkits) need EGL features the Android driver lacks; sway asks for the Android platform, which only libhybris provides. `hybris-run <app>` puts a GLES app on the GPU. Private libdir `/usr/lib/libhybris`. Patched for running **without any Android userspace** (properties from `/etc/hybris/props.conf` + build.prop files, gralloc HAL loaded directly, no hwservicemanager) and for a few bugs, see below. |
-| `wlroots0.20-hybris` | Drop-in `wlroots0.20` for sway with an **fbdev backend** (the decon display has no KMS; fixed 60 Hz frame clock, damage-only copies) and the **GLES2 renderer on libhybris**: gralloc render buffers (`EGL_NATIVE_BUFFER_ANDROID`), GPU clients through `EGL_WL_bind_wayland_display`. |
+| `libhybris-armtix` | libhybris as a **GLVND EGL vendor**, ordered *after* Mesa (`60_libhybris.json`), so outside the GPU sway session (software fallback) apps get Mesa. `armtix-sway` puts it first for its apps (`__EGL_VENDOR_LIBRARY_FILENAMES`), Mesa second for GBM/X11/desktop GL; sway asks for the Android platform, which only libhybris provides. `hybris-run <app>` (GPU only) and `mesa-run <app>` (software) override it per app. Private libdir `/usr/lib/libhybris`. Patched for running **without any Android userspace** (properties from `/etc/hybris/props.conf` + build.prop files, gralloc HAL loaded directly, no hwservicemanager) and for a few bugs, see below. |
+| `wlroots0.20-hybris` | Drop-in `wlroots0.20` for sway with an **fbdev backend** (the decon display has no KMS; fixed 60 Hz frame clock, damage-only copies on 4 threads with a NEON red/blue swap: `WLR_FBDEV_THREADS`, `WLR_FBDEV_STATS=1` logs the timings) and the **GLES2 renderer on libhybris**: gralloc render buffers (`EGL_NATIVE_BUFFER_ANDROID`), GPU clients through `EGL_WL_bind_wayland_display`. |
 | `libudev-zero-armtix` | libudev without udevd (which doesn't run on 4.4), so libinput finds the touchscreen/keys; only used by the sway session. |
 | `wvkbd` | On-screen keyboard (not in the repositories). |
 | `gl4es-armtix` | [gl4es](https://github.com/ptitSeb/gl4es): desktop OpenGL 2.1 → OpenGL ES 2 on the Mali GPU. `gl4es-run <app>` for Wayland/EGL apps (EGL wrapper patched to offer desktop GL configs and API), `gl4es-x11-run <app>` for X11/GLX apps under Xwayland (pbuffer + copy, ~15 fps cap: the driver reads its tiled buffers back slowly). |
 | `glfw-minecraft` | GLFW 3.5.1 in `/usr/lib/glfw-minecraft` that doesn't report Wayland's unsupported features (window icon/position, cursor position) as errors: old Minecraft treats any GLFW error as fatal. |
+| `armtix-camera` | Simple camera app for the rear camera: raw Bayer frames from the FIMC-IS V4L2 driver (no ISP; needs the kernel's raw-capture changes in `fimc-is-device-sensor_v2.c` and `fimc-is-video-sensor.c`, part of `kernel/armtix-kernel.patch`), CPU debayer, auto exposure + gray-world white balance, SDL3 preview on the GPU, 12 MP JPEGs in `~/Pictures`. Boot service `armtix-camera` gives the video nodes to group video. Firmware: the installer copies it from VENDOR. |
+| `fex-emu-armv8.0-bin` | [FEX-Emu](https://fex-emu.com) (x86/x86-64 on arm64), the upstream ARMv8.0 build (no LSE atomics on this CPU) plus `fex-compat.so`, which emulates what FEX needs from kernels newer than 4.4 (`MAP_FIXED_NOREPLACE`, CPU ID register reads, `openat2`, ...). `fex-run <program>`, `steam-fex` (see below). |
 | `lan-mouse-armtix` | [lan-mouse](https://github.com/feschber/lan-mouse) 0.11 receiver: use a PC's keyboard and mouse on the phone (see below). |
 
 Device side (not packaged, no Samsung blobs here): the TWRP installer copies
@@ -37,20 +40,37 @@ Samsung's Android 9 based firmware and ROMs built on it.
 Rootfs (`rootfs/overlay`): `armtix-gpu` (boot: `/dev/mali0`, `/dev/ion`,
 `/dev/fb0` to group video), `seatd`, `armtix-sway` (session launcher, falls
 back to software rendering if the GPU path can't start), sway/waybar/foot/
-fuzzel/mako configs, `armtix-osk` (keyboard toggle), sway-aware
-`armtix-rotate` and `armtix-power-menu`, `armtix-mc-gpu` (Minecraft wrapper).
-tty1 autologin starts sway; `echo xfce > ~/.config/armtix-session` switches
-back to XFCE.
+fuzzel/mako/foot configs as a theme (`armtix-theme`, themes in
+`~/.config/armtix-themes`), `armtix-osk` (keyboard toggle), `armtix-rotate`
+(also switches between the portrait and landscape wallpaper),
+`armtix-power-menu`, `armtix-mc-gpu` (Minecraft wrapper), and a `bwrap`
+wrapper (see below). tty1 autologin starts sway (XFCE and Xorg were removed;
+Xwayland stays for X11 apps).
 
 `tools/hybris_deploy.sh [ssh-target]` sets all of this up on a phone installed
 from an older zip.
 
+## x86 programs and Steam (FEX-Emu)
+
+Once, as the user: `FEXRootFSFetcher -y -x --distro-name=ubuntu
+--distro-version=24.04` (x86 Ubuntu RootFS, ~500 MB download, 1.9 GB on
+disk). Then `fex-run <x86 program>`.
+
+`steam-fex` sets up and starts the Steam client (needs the kernel's user
+namespaces and SysV IPC, both in `armtix_dream2lte_defconfig`). Games: game
+*Properties → Compatibility → "Legacy runtime 1.0"* (the newer Steam Linux
+Runtime containers don't start on this kernel). x86 games run as X11 apps
+under Xwayland; `guest/sdl-nomsaa.c` is a preload for SDL2 games that insist
+on multisampled visuals (Half-Life), with per-game settings in
+`~/.config/fex-emu/AppConfig/`.
+
 ## Minecraft (Prism Launcher)
 
-Minecraft up to 1.16.5 (OpenGL 2.1) runs on the GPU through gl4es, natively
-on Wayland; ~40–50 fps at low settings, render distance 6–8. Newer versions
-need OpenGL 3.2 core, which gl4es doesn't provide. In the instance settings
-(*Edit instance*):
+Not in the image: install `prismlauncher` and `glfw-minecraft` (from here)
+first. Minecraft up to 1.16.5 (OpenGL 2.1) runs on the GPU through gl4es,
+natively on Wayland; ~40–50 fps at low settings, render distance 6–8. Newer
+versions need OpenGL 3.2 core, which gl4es doesn't provide. In the instance
+settings (*Edit instance*):
 
 - **Version**: change *LWJGL 3* to **3.3.3** (Wayland support, arm64 natives).
 - **Settings → Java**: maximum memory **1536 MB** (the phone has 3.6 GB);
@@ -128,8 +148,22 @@ phone wlroots builds in about two minutes, lan-mouse in about ten.
 - **sway has `cap_sys_nice`**, so the dynamic linker ignores
   `LD_LIBRARY_PATH` (no libudev-zero → no input devices). `armtix-sway`
   starts it through `ld-linux-aarch64.so.1` instead.
-- With libhybris as the *first* EGL vendor, Firefox opened a blank window
-  and other big apps misbehaved → apps default to Mesa.
+- **Firefox on the GPU hung with an empty window**: libhybris wrapped
+  `eglSwapBuffers` and `eglSwapBuffersWithDamageEXT` but not the **KHR**
+  variant, which Firefox uses: the driver's own function queued buffers the
+  Wayland platform never attached, and after 3 frames `dequeueBuffer` waited
+  forever for a release. Now routed through the same wrapper.
+- **Qt 6 (Telegram, Kvant, ...) found no EGLConfig**: Arch builds Qt for
+  desktop GL, so it binds the GLES API but asks for `EGL_OPENGL_BIT` configs.
+  libhybris now offers the GLES configs then (only when the GLES API is
+  bound: apps that bound desktop GL get nothing and fall back), Qt sees no
+  `EGL_OPENGL_BIT` on the config and switches itself to GLES;
+  `eglCreateContext` clamps the version to 3.2 and drops desktop-only
+  attributes.
+- GLVND picks the vendor once per display, so an app that *needs* desktop
+  OpenGL over Wayland EGL (some SDL/GLFW games) can't fall back to Mesa by
+  itself in the sway session: `mesa-run <app>` or `gl4es-run <app>`. GLX
+  apps under Xwayland always use Mesa.
 - libhybris bugs fixed in `libhybris-armtix.patch`: its Wayland platform
   stopped waiting for the `android_wlegl` global after the first batch of
   events (random crash in `eglCreateWindowSurface`); a request for the
@@ -138,6 +172,20 @@ phone wlroots builds in about two minutes, lan-mouse in about ten.
   crashed in Mali's exit handlers.
 - The fuel gauge reports `charge_now=1`, so waybar's battery module shows 0%;
   the bar reads `/sys/class/power_supply/battery/capacity` itself.
+- **Image loading needs a `bwrap` wrapper**: gdk-pixbuf decodes images in
+  glycin loaders inside a bubblewrap sandbox, and bubblewrap 0.13 needs mount
+  syscalls the 4.4 kernel lacks ("Can't open source /usr: Function not
+  implemented"), so no wallpaper and no images in GTK apps. glycin ignores
+  `GLYCIN_DISABLE_SANDBOX` in Arch's build; `/usr/local/bin/bwrap` runs the
+  glycin loaders directly and passes everything else to the real bwrap.
+- **sway sometimes crashed after `swaymsg reload`** (double free), so
+  `armtix-theme` applies a theme with runtime commands and reloads waybar
+  with SIGUSR2 instead.
+- **Camera init at boot hung the boot**: reading
+  `/sys/class/camera/rear/fw_update` makes the driver request firmware,
+  which only `armtix-fwload` answers (no udev); before it runs every request
+  waits for a long timeout, and the audio DSP's firmware request behind them
+  timed out too. The camera app does that read itself.
 - bcmdhd WiFi power saving drops the connection now and then; the `wifi`
   service turns it off.
 - Building inside a chroot on the *Android* kernel hangs `meson install`
@@ -146,8 +194,9 @@ phone wlroots builds in about two minutes, lan-mouse in about ten.
 ## Checking
 
 ```sh
-eglinfo -p wayland | grep -i vendor            # apps: "Mesa Project"
-hybris-run eglinfo -p wayland | grep -i vendor # "Android" = libhybris
+eglinfo -B -p wayland | grep -i vendor          # in sway: "Android" = libhybris
+mesa-run eglinfo -B -p wayland | grep -i vendor # "Mesa Project"
+grep -c libGLES_mali /proc/$(pgrep -xo firefox)/maps  # > 0: app is on the GPU
 gl4es-run eglgears_wayland                     # desktop GL on the GPU
 grep -iE 'hybris|GL renderer' ~/.local/state/sway.log
 ```

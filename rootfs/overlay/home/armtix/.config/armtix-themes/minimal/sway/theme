@@ -1,0 +1,21 @@
+# Theme "minimal" (near-black, warm grays, JetBrains Mono): sway part.
+# Installed by armtix-theme, included from ~/.config/sway/config.
+# palette: base #111111  surface #1a1a1a  line #333333  dim #5c5c5c
+#          muted #8a8580  text #d6d2cc  bright #efebe6  sand #c8ab84
+#          slate #8d9aa4  rust #c27c6e
+output $out bg ~/.config/sway/wallpaper.png fill #111111
+font pango:JetBrains Mono 8
+default_border pixel 1
+default_floating_border pixel 1
+titlebar_padding 8 4
+titlebar_border_thickness 1
+title_align left
+gaps inner 4
+gaps outer 2
+hide_edge_borders none
+#                       border  bg      text    indicator child_border
+client.focused          #b8b0a4 #1a1a1a #efebe6 #b8b0a4   #b8b0a4
+client.focused_inactive #333333 #111111 #8a8580 #333333   #333333
+client.unfocused        #222222 #0e0e0e #5c5c5c #222222   #222222
+client.urgent           #c27c6e #2a1a17 #efebe6 #c27c6e   #c27c6e
+client.background       #111111

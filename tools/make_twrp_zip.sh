@@ -6,6 +6,10 @@
 #   tools/make_twrp_zip.sh --server [ssh-target]  minimal server image, built
 #                                                 on the phone in a chroot
 #                                                 (tools/build_server_rootfs.sh)
+#   tools/make_twrp_zip.sh --server --proxy      the phone downloads the
+#                                                 packages through this PC
+#                                                 (SSH SOCKS proxy; for a phone
+#                                                 without WiFi)
 #   tools/make_twrp_zip.sh [--server] --reuse-rootfs
 #                                                 no phone: reuse the staged
 #                                                 rootfs.tar.xz + caps.txt, only
@@ -20,10 +24,12 @@ set -euo pipefail
 W="$(cd "$(dirname "$0")/.." && pwd)"
 VARIANT=full
 REUSE=0
+PROXY=0
 while [ $# -gt 0 ]; do
 	case $1 in
 		--server) VARIANT=server; shift ;;
 		--reuse-rootfs) REUSE=1; shift ;;
+		--proxy) PROXY=1; shift ;;
 		*) break ;;
 	esac
 done
@@ -118,7 +124,14 @@ HASH=$(openssl passwd -6 armtix)
 if [ $VARIANT = server ]; then
 	echo ">> server rootfs (built on $TARGET)"
 	server_overlay_tar | "${SSH[@]}" 'rm -rf /tmp/armtix-server-ov && mkdir -p /tmp/armtix-server-ov && tar -xpf - -C /tmp/armtix-server-ov'
-	"${SSH[@]}" 'sh -s' < "$W/tools/build_server_rootfs.sh"
+	if [ $PROXY = 1 ]; then
+		# remote dynamic forward: a SOCKS proxy on the phone's 127.0.0.1:1080
+		# that goes out through this PC (pacman's libcurl honors all_proxy)
+		"${SSH[@]:0:${#SSH[@]}-1}" -R 1080 "$TARGET" \
+			'all_proxy=socks5h://127.0.0.1:1080 sh -s' < "$W/tools/build_server_rootfs.sh"
+	else
+		"${SSH[@]}" 'sh -s' < "$W/tools/build_server_rootfs.sh"
+	fi
 	R=/home/armtix/srv-build/root
 	echo ">> file capabilities"
 	"${SSH[@]}" "getcap -r $R/usr 2>/dev/null" | awk -v r="$R" '{sub("^" r, "", $1); print $1, $2}' > "$STAGE/armtix/caps.txt"
@@ -156,4 +169,4 @@ ls -la "$STAGE/armtix"
 echo ">> zip"
 rm -f "$OUT"
 (cd "$STAGE" && zip -r -0 -q "$OUT" META-INF armtix README.txt)
-ls -la "$OUT"; sha256sum "$OUT" | tee "$OUT.sha256"
+ls -la "$OUT"; (cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")") | tee "$OUT.sha256"	# bare name: checkable after download

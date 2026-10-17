@@ -83,6 +83,7 @@ image with `dt_size` set in the boot header, or S-Boot ignores it;
 ```sh
 tools/make_twrp_zip.sh                # desktop image, from the running phone
 tools/make_twrp_zip.sh --server       # server image, built on the phone in a chroot
+                                      # (+ --proxy: downloads through the PC, no WiFi needed)
 tools/make_twrp_zip.sh --reuse-rootfs # repack only (installer, boot image, README)
 ```
 
